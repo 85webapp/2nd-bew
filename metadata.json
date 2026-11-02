@@ -1,0 +1,6 @@
+{
+  "name": "CTC System - Legal & Tax Processing Panel",
+  "description": "Ultra-modern Admin & Processing Panel for Quadtrix / DOC India legal-tech and tax-compliance ecosystem with automated AES-256 decryption, 28 legal templates, dynamic form editor, e-Stamp ingestion, and API automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
