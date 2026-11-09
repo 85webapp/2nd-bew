@@ -3,14 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  * 
  * Profile & Order Status Drawer Modal
- * Strict User Requirements:
- * 1. Confirmed Orders (कन्फर्मड ऑर्डर) - Shows all confirmed orders with e-Stamp attached
- * 2. Cancelled (कैंसिल्ड) - Shows all cancelled orders with full details
- * 3. Pending (पेंडिंग में) - Orders where e-Stamp is not yet added
- * 4. Submit Request (सबमिट रिक्वेस्ट) - Review queue with Confirm & Cancel buttons.
+ * Strict English Only:
+ * 1. Confirmed Orders - Shows all confirmed orders with e-Stamp attached
+ * 2. Cancelled - Shows all cancelled orders with full details
+ * 3. Pending - Orders where e-Stamp is not yet added
+ * 4. Submit Request - Review queue with Confirm & Cancel buttons.
  *    - Strict rule: Only orders with e-Stamp attached can be clicked "Confirm"!
- *    - Confirmed moves to Confirmed Orders
- *    - Cancelled moves to Cancelled Orders
  */
 
 import React, { useState } from 'react';
@@ -23,10 +21,7 @@ import {
   Clock, 
   Send, 
   User, 
-  Phone, 
   ChevronRight, 
-  ShieldCheck, 
-  FileText,
   AlertCircle
 } from 'lucide-react';
 
@@ -50,7 +45,6 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
   onSelectOrderForView
 }) => {
   const [activeSection, setActiveSection] = useState<ProfileSection>('confirmed');
-  const [cancelModalOrderId, setCancelModalOrderId] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -115,7 +109,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
             >
               <div className="flex items-center gap-1.5 truncate">
                 <CheckCircle2 className={`w-3.5 h-3.5 ${activeSection === 'confirmed' ? 'text-white' : 'text-emerald-600'}`} />
-                <span className="truncate">कन्फर्मड (Confirmed)</span>
+                <span className="truncate">Confirmed</span>
               </div>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeSection === 'confirmed' ? 'bg-blue-700 text-white' : 'bg-slate-200 text-slate-700'
@@ -135,7 +129,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
             >
               <div className="flex items-center gap-1.5 truncate">
                 <XCircle className={`w-3.5 h-3.5 ${activeSection === 'cancelled' ? 'text-white' : 'text-red-500'}`} />
-                <span className="truncate">कैंसिल्ड (Cancelled)</span>
+                <span className="truncate">Cancelled</span>
               </div>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeSection === 'cancelled' ? 'bg-blue-700 text-white' : 'bg-slate-200 text-slate-700'
@@ -155,7 +149,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
             >
               <div className="flex items-center gap-1.5 truncate">
                 <Clock className={`w-3.5 h-3.5 ${activeSection === 'pending' ? 'text-white' : 'text-amber-500'}`} />
-                <span className="truncate">पेंडिंग (Pending)</span>
+                <span className="truncate">Pending</span>
               </div>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeSection === 'pending' ? 'bg-blue-700 text-white' : 'bg-slate-200 text-slate-700'
@@ -175,7 +169,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
             >
               <div className="flex items-center gap-1.5 truncate">
                 <Send className={`w-3.5 h-3.5 ${activeSection === 'submit_request' ? 'text-white' : 'text-blue-500'}`} />
-                <span className="truncate">सबमिट रिक्वेस्ट (Review)</span>
+                <span className="truncate">Submit Request</span>
               </div>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeSection === 'submit_request' ? 'bg-blue-700 text-white' : 'bg-slate-200 text-slate-700'
@@ -194,7 +188,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
           {activeSection === 'confirmed' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs text-slate-600 font-semibold px-1">
-                <span>कन्फर्मड ऑर्डर्स (All Confirmed with e-Stamp):</span>
+                <span>Confirmed Orders (e-Stamp Attached):</span>
                 <span>{confirmedOrders.length} Records</span>
               </div>
 
@@ -249,7 +243,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
           {activeSection === 'cancelled' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs text-slate-600 font-semibold px-1">
-                <span>कैंसिल्ड ऑर्डर्स (Cancelled Records with Full Details):</span>
+                <span>Cancelled Orders:</span>
                 <span>{cancelledOrders.length} Records</span>
               </div>
 
@@ -303,7 +297,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
           {activeSection === 'pending' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs text-slate-600 font-semibold px-1">
-                <span>पेंडिंग ऑर्डर्स (e-Stamp Pending):</span>
+                <span>Pending Orders (e-Stamp Awaited):</span>
                 <span>{pendingOrders.length} Records</span>
               </div>
 
@@ -354,7 +348,7 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
             </div>
           )}
 
-          {/* Section: SUBMIT REQUEST (Review Queue with Confirm & Cancel) */}
+          {/* Section: SUBMIT REQUEST */}
           {activeSection === 'submit_request' && (
             <div className="space-y-3">
               <div className="bg-blue-50 border border-blue-200 p-3 rounded-xl text-xs text-blue-900 flex items-center gap-2">
@@ -364,94 +358,100 @@ export const ProfileDrawerModal: React.FC<ProfileDrawerModalProps> = ({
                 </span>
               </div>
 
-              {submitRequests.map((order) => {
-                const dateStd = formatDateStandard(order.createdAt);
-                const p1 = order.legalData?.party1?.fullName || order.clientName;
-                const hasStamp = Boolean(order.stampData?.verified);
-                const isAlreadyConfirmed = order.status === 'confirmed';
+              {submitRequests.length === 0 ? (
+                <div className="bg-white rounded-xl border border-gray-200 p-10 text-center">
+                  <p className="text-sm font-bold text-slate-700">No Review Requests Available</p>
+                </div>
+              ) : (
+                submitRequests.map((order) => {
+                  const dateStd = formatDateStandard(order.createdAt);
+                  const p1 = order.legalData?.party1?.fullName || order.clientName;
+                  const hasStamp = Boolean(order.stampData?.verified);
+                  const isAlreadyConfirmed = order.status === 'confirmed';
 
-                return (
-                  <div key={order.id} className="bg-white rounded-xl border border-gray-200 p-4 shadow-xs hover:border-blue-300 transition-colors">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      
-                      <div className="space-y-1">
-                        <h4 className="text-sm font-black text-slate-900 uppercase">{order.formName}</h4>
-                        <div className="font-mono text-xs font-bold text-blue-600">{order.id}</div>
-                        <div className="text-xs text-slate-700">First Party: <strong>{p1}</strong></div>
-                        <div className="text-xs text-slate-600">Contact: <span className="font-mono">{order.clientPhone}</span></div>
+                  return (
+                    <div key={order.id} className="bg-white rounded-xl border border-gray-200 p-4 shadow-xs hover:border-blue-300 transition-colors">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         
-                        <div className="pt-1">
-                          {hasStamp ? (
-                            <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>e-Stamp Attached: {order.stampData?.uin}</span>
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                              <Clock className="w-3.5 h-3.5" />
-                              <span>e-Stamp Pending</span>
-                            </span>
-                          )}
+                        <div className="space-y-1">
+                          <h4 className="text-sm font-black text-slate-900 uppercase">{order.formName}</h4>
+                          <div className="font-mono text-xs font-bold text-blue-600">{order.id}</div>
+                          <div className="text-xs text-slate-700">First Party: <strong>{p1}</strong></div>
+                          <div className="text-xs text-slate-600">Contact: <span className="font-mono">{order.clientPhone}</span></div>
+                          
+                          <div className="pt-1">
+                            {hasStamp ? (
+                              <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>e-Stamp Attached: {order.stampData?.uin}</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                                <Clock className="w-3.5 h-3.5" />
+                                <span>e-Stamp Pending</span>
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
 
-                      {/* Action Controls */}
-                      <div className="flex flex-wrap items-center sm:flex-col sm:items-end justify-between sm:justify-center gap-2.5 border-t sm:border-t-0 pt-2 sm:pt-0 border-gray-100">
-                        <div className="text-right">
-                          <span className="text-[10px] uppercase text-slate-400 font-bold block">Stamp Duty</span>
-                          <span className="font-mono font-black text-slate-900 text-sm">₹ {order.stampDutyValue}</span>
-                        </div>
+                        {/* Action Controls */}
+                        <div className="flex flex-wrap items-center sm:flex-col sm:items-end justify-between sm:justify-center gap-2.5 border-t sm:border-t-0 pt-2 sm:pt-0 border-gray-100">
+                          <div className="text-right">
+                            <span className="text-[10px] uppercase text-slate-400 font-bold block">Stamp Duty</span>
+                            <span className="font-mono font-black text-slate-900 text-sm">₹ {order.stampDutyValue}</span>
+                          </div>
 
-                        <div className="flex items-center gap-2">
-                          {/* Cancel Button */}
-                          <button
-                            onClick={() => onCancelOrder(order.id, 'Cancelled from Submit Request Desk')}
-                            className="px-3 py-1.5 rounded-lg text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors active:scale-95"
-                          >
-                            Cancel
-                          </button>
-
-                          {/* Confirm Button: Strict check for e-Stamp */}
-                          {hasStamp ? (
+                          <div className="flex items-center gap-2">
+                            {/* Cancel Button */}
                             <button
-                              onClick={() => onConfirmOrder(order.id)}
-                              disabled={isAlreadyConfirmed}
-                              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold text-white transition-all shadow-xs ${
-                                isAlreadyConfirmed
-                                  ? 'bg-emerald-600 cursor-default'
-                                  : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
-                              }`}
+                              onClick={() => onCancelOrder(order.id, 'Cancelled from Submit Request Desk')}
+                              className="px-3 py-1.5 rounded-lg text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors active:scale-95"
                             >
-                              {isAlreadyConfirmed ? 'Confirmed ✓' : 'Confirm'}
+                              Cancel
                             </button>
-                          ) : (
+
+                            {/* Confirm Button */}
+                            {hasStamp ? (
+                              <button
+                                onClick={() => onConfirmOrder(order.id)}
+                                disabled={isAlreadyConfirmed}
+                                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold text-white transition-all shadow-xs ${
+                                  isAlreadyConfirmed
+                                    ? 'bg-emerald-600 cursor-default'
+                                    : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
+                                }`}
+                              >
+                                {isAlreadyConfirmed ? 'Confirmed ✓' : 'Confirm'}
+                              </button>
+                            ) : (
+                              <button
+                                disabled
+                                title="e-Stamp must be attached in Upload tab before confirming"
+                                className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed opacity-75"
+                              >
+                                Confirm (Locked)
+                              </button>
+                            )}
+
+                            {/* View Button */}
                             <button
-                              disabled
-                              title="e-Stamp must be attached in Upload tab before confirming"
-                              className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed opacity-75"
+                              onClick={() => {
+                                onClose();
+                                onSelectOrderForView(order);
+                              }}
+                              className="p-1.5 rounded-lg text-slate-600 hover:text-blue-600 hover:bg-slate-100"
+                              title="View Full Document"
                             >
-                              Confirm (Locked)
+                              <ChevronRight className="w-4 h-4" />
                             </button>
-                          )}
-
-                          {/* View Button */}
-                          <button
-                            onClick={() => {
-                              onClose();
-                              onSelectOrderForView(order);
-                            }}
-                            className="p-1.5 rounded-lg text-slate-600 hover:text-blue-600 hover:bg-slate-100"
-                            title="View Full Document"
-                          >
-                            <ChevronRight className="w-4 h-4" />
-                          </button>
+                          </div>
                         </div>
-                      </div>
 
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
           )}
 

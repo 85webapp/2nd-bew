@@ -4,18 +4,18 @@
  * 
  * Orders Tab Component
  * Specifications:
- * 1. Top tabs: "Legal Document Requests" and "Registration & Compliance Leads" (without number badge)
+ * 1. Top tabs: "Legal Document Requests" and "Registration & Compliance Leads"
  * 2. White Dropdown Menu next to search:
- *    - For Legal: All (28 docs), Requests (5 specific docs), Normal DOC (23 docs)
+ *    - For Legal: All, Requests, Normal DOC
  *    - For Registration: All, Registrations, Insurance, Filing, Notices
- * 3. NO "Simulate Ingest" button
- * 4. Card layout:
- *    - Top: Big bold Form Name
+ * 3. Card layout:
+ *    - Top: Bold Form Name
  *    - Below: CTC-2026-200X
  *    - Below: First Party Name & Contact Number
  *    - Below: e-Stamp Attached (in green) or Pending
  *    - Right side: Stamp Paper Price, Date below price, Single Button: "View"
- * 5. Clicking View opens the dedicated new page view!
+ * 4. Empty state when no orders have arrived yet
+ * 5. Quick action to unlock inbound payloads from Website A
  */
 
 import React, { useState } from 'react';
@@ -31,17 +31,21 @@ import {
   ChevronRight, 
   ChevronDown,
   User, 
-  Phone 
+  Phone,
+  KeyRound,
+  Inbox
 } from 'lucide-react';
 
 interface OrdersViewProps {
   orders: Order[];
   onSelectOrderForView: (order: Order) => void;
+  onOpenUnlocker?: () => void;
 }
 
 export const OrdersView: React.FC<OrdersViewProps> = ({
   orders,
   onSelectOrderForView,
+  onOpenUnlocker
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<OrderCategory>('legal');
   const [searchQuery, setSearchQuery] = useState('');
@@ -68,17 +72,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
     }
 
-    // 3. 24-Hour Auto-Filter Rule (Orders older than 24 hours disappear from orders list, unless manually searched)
-    const isSearching = Boolean(searchQuery.trim());
-    const orderTimestamp = new Date(order.createdAt).getTime();
-    const isWithin24h = (Date.now() - orderTimestamp) <= 24 * 60 * 60 * 1000;
-    
-    if (!isSearching && !isWithin24h) {
-      return false;
-    }
-
-    // 4. Search query (Manual search reveals older records as well)
-    if (isSearching) {
+    // 3. Search query
+    if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const p1 = order.legalData?.party1?.fullName?.toLowerCase() || order.clientName.toLowerCase();
       const fn = order.formName.toLowerCase();
@@ -93,7 +88,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   return (
     <div className="space-y-5 pb-20">
       
-      {/* 1. Category Switch Tabs (Without Numbers) */}
+      {/* 1. Category Switch Tabs */}
       <div className="bg-white rounded-xl border border-gray-200 p-2 shadow-xs">
         <div className="grid grid-cols-2 gap-2">
           
@@ -130,11 +125,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         </div>
       </div>
 
-      {/* 2. Search Bar + Clean White Dropdown Menu (No Simulate Ingest button) */}
+      {/* 2. Search Bar + Clean White Dropdown Menu + Unlock Action */}
       <div className="bg-white rounded-xl border border-gray-200 p-3 shadow-xs flex flex-wrap items-center justify-between gap-3">
         
         {/* Search input */}
-        <div className="flex-1 min-w-[240px] relative">
+        <div className="flex-1 min-w-[220px] relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
@@ -145,18 +140,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           />
         </div>
 
-        {/* White Dropdown Menu */}
+        {/* White Dropdown Menu & Quick Inbound Unlock */}
         <div className="flex items-center gap-2">
           {selectedCategory === 'legal' ? (
             <div className="relative">
               <select
                 value={legalSubFilter}
                 onChange={(e) => setLegalSubFilter(e.target.value as any)}
-                className="appearance-none text-xs font-bold px-4 py-2 pr-8 rounded-lg border border-gray-300 bg-white text-slate-800 shadow-2xs hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer min-w-[150px]"
+                className="appearance-none text-xs font-bold px-4 py-2 pr-8 rounded-lg border border-gray-300 bg-white text-slate-800 shadow-2xs hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer min-w-[140px]"
               >
-                <option value="all">All (28 Formats)</option>
-                <option value="requests">Requests (5 Formats)</option>
-                <option value="normal_doc">Normal DOC (23 Formats)</option>
+                <option value="all">All Documents</option>
+                <option value="requests">Requests Group</option>
+                <option value="normal_doc">Standard Documents</option>
               </select>
               <ChevronDown className="w-4 h-4 text-slate-500 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             </div>
@@ -165,7 +160,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <select
                 value={regSubFilter}
                 onChange={(e) => setRegSubFilter(e.target.value as any)}
-                className="appearance-none text-xs font-bold px-4 py-2 pr-8 rounded-lg border border-gray-300 bg-white text-slate-800 shadow-2xs hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer min-w-[170px]"
+                className="appearance-none text-xs font-bold px-4 py-2 pr-8 rounded-lg border border-gray-300 bg-white text-slate-800 shadow-2xs hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer min-w-[150px]"
               >
                 <option value="all">All Categories</option>
                 <option value="all_states">All States</option>
@@ -177,32 +172,43 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <ChevronDown className="w-4 h-4 text-slate-500 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             </div>
           )}
+
+          {onOpenUnlocker && (
+            <button
+              onClick={onOpenUnlocker}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition-colors"
+              title="Unlock Inbound Order from Website A"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>Unlock Payload</span>
+            </button>
+          )}
         </div>
 
       </div>
 
-      {/* 24-Hour Active Feed Indicator */}
-      <div className="flex items-center justify-between text-[11px] text-slate-500 bg-slate-50 px-3.5 py-1.5 rounded-lg border border-slate-200">
-        <div className="flex items-center gap-1.5 font-medium">
-          <Clock className="w-3.5 h-3.5 text-blue-600" />
-          <span>
-            {searchQuery.trim() 
-              ? `Manual Search Active: Showing results matching "${searchQuery}" across all time` 
-              : 'Auto-Filter Active: Showing live orders from the last 24 hours (Use search to look up older orders)'}
-          </span>
-        </div>
-        <span className="font-mono font-bold text-slate-700 bg-white px-2 py-0.5 rounded border border-gray-200">
-          {filteredOrders.length} {filteredOrders.length === 1 ? 'Order' : 'Orders'}
-        </span>
-      </div>
-
-      {/* 3. Orders List (Exact layout specified by user) */}
+      {/* 3. Orders List */}
       <div className="space-y-3.5">
         {filteredOrders.length === 0 ? (
-          <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
-            <FileText className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-            <h3 className="text-base font-bold text-slate-800">No Orders Found</h3>
-            <p className="text-xs text-slate-500 mt-1">Try changing the dropdown filter or search term.</p>
+          <div className="bg-white rounded-2xl border border-dashed border-gray-300 p-12 text-center max-w-lg mx-auto my-6 space-y-3">
+            <div className="w-14 h-14 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+              <Inbox className="w-7 h-7" />
+            </div>
+            <h3 className="text-base font-bold text-slate-800">
+              No Inbound Orders Yet
+            </h3>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              When Website A sends encrypted client requests, or when you unlock an inbound payload using the Master Key, they will appear here in real-time.
+            </p>
+            {onOpenUnlocker && (
+              <button
+                onClick={onOpenUnlocker}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-xs transition-colors"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Unlock Inbound Payload from Website A</span>
+              </button>
+            )}
           </div>
         ) : (
           filteredOrders.map((order) => {
@@ -218,34 +224,28 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               >
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   
-                  {/* Left Column: Form Name -> ID -> First Party -> Contact -> e-Stamp Status */}
+                  {/* Left Column */}
                   <div className="space-y-1 flex-1">
-                    
-                    {/* 1. SABSE UPAR: FORM KA NAAM */}
                     <h2 className="text-base sm:text-lg font-black text-slate-900 tracking-tight uppercase leading-snug">
                       {order.formName}
                     </h2>
 
-                    {/* 2. CTC-2026-200X NUMBER */}
                     <div className="font-mono text-xs font-bold text-blue-600 tracking-wide">
                       {order.id}
                     </div>
 
-                    {/* 3. FIRST PARTY NAME */}
                     <div className="flex items-center gap-1.5 text-xs text-slate-800 pt-0.5">
                       <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span className="text-slate-500">First Party:</span>
                       <strong className="text-slate-900">{party1Name}</strong>
                     </div>
 
-                    {/* 4. CONTACT NUMBER */}
                     <div className="flex items-center gap-1.5 text-xs text-slate-800">
                       <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span className="text-slate-500">Contact:</span>
                       <span className="font-mono font-medium text-slate-900">{contactPhone}</span>
                     </div>
 
-                    {/* 5. E-STAMP STATUS (GREEN COLOR IF ATTACHED) */}
                     <div className="pt-1">
                       {hasStamp ? (
                         <div className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
@@ -259,13 +259,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         </div>
                       )}
                     </div>
-
                   </div>
 
-                  {/* Right Column: Stamp Paper Price -> Date Below Price -> Single "View" Button */}
+                  {/* Right Column */}
                   <div className="flex sm:flex-col items-end justify-between sm:justify-start gap-3 border-t sm:border-t-0 pt-3 sm:pt-0 border-gray-100">
-                    
-                    {/* Stamp Paper Price & Date directly below */}
                     <div className="text-right">
                       <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold block">
                         Stamp Paper Price
@@ -278,15 +275,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       </span>
                     </div>
 
-                    {/* SINGLE OPTION BUTTON: "View" ONLY */}
+                    {/* Single "View" Button */}
                     <button
                       onClick={() => onSelectOrderForView(order)}
-                      className="flex items-center gap-1 px-4 py-2 rounded-lg text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all active:scale-95"
+                      className="flex items-center gap-1 px-4 py-2 rounded-lg text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 shadow-sm transition-all active:scale-95 cursor-pointer"
                     >
                       <span>View</span>
                       <ChevronRight className="w-4 h-4" />
                     </button>
-
                   </div>
 
                 </div>

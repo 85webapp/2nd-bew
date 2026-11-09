@@ -39,6 +39,17 @@ const MASTER_KEY = process.env.MASTER_KEY || 'CTC_QUADTRIX_MASTER_KEY_2026_SECUR
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
+// Enable CORS for external Website A inbound requests and webhooks
+app.use((_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (_req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Helper to derive 32-byte key from string
 function derive32ByteKey(passphrase: string): Buffer {
   return crypto.createHash('sha256').update(passphrase).digest();
@@ -193,19 +204,72 @@ app.post('/api/webhook/website-a', (req: Request, res: Response) => {
   };
   systemAuditTrail.unshift(auditEntry);
 
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
+  const clientName = orderData.clientName || orderData.party1?.fullName || orderData.party2?.fullName || 'Client';
+  const formName = orderData.formName || orderData.documentTitle || 'Legal Service';
+
   // Send notification
   const notification = {
     id: `tg-${Date.now()}`,
     timestamp: new Date().toISOString(),
     orderId,
-    clientName: orderData.clientName || orderData.party2?.fullName || 'Client',
-    serviceName: orderData.formName || orderData.documentTitle || 'Legal Service',
+    clientName,
+    serviceName: formName,
     category: orderData.category || 'legal',
-    channel: '@Quadtrix_Ops_Alerts',
-    status: 'Delivered',
-    messageText: `⚡ *INBOUND WEBSITE A ORDER*\n• ID: ${orderId}\n• Client: ${orderData.clientName || 'N/A'}\n• Form: ${orderData.formName || 'Legal Doc'}`
+    channel: tgChatId,
+    status: botToken ? 'Delivered' : 'Simulated',
+    messageText: `⚡ *INBOUND ORDER RECEIVED FROM WEBSITE A*\n• ID: ${orderId}\n• Client: ${clientName}\n• Service: ${formName}\n• Duty: ₹${orderData.stampDutyValue || orderData.stampDutyAmount || 500}/-\n• Decrypted via Shared Master Key`
   };
   notificationsLog.unshift(notification);
+
+  // Dispatch live Telegram bot HTTP message if configured
+  if (botToken) {
+    try {
+      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text: notification.messageText,
+          parse_mode: 'Markdown'
+        })
+      }).catch(() => {});
+    } catch {}
+  }
+
+  // Sync to Supabase if configured in server environment
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY;
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const cleanUrl = supabaseUrl.replace(/\/+$/, '');
+      fetch(`${cleanUrl}/rest/v1/orders`, {
+        method: 'POST',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates'
+        },
+        body: JSON.stringify({
+          id: orderId,
+          reference_code: orderData.referenceCode || `WA-REF-${Date.now()}`,
+          client_name: clientName,
+          client_phone: orderData.clientPhone || '',
+          form_name: formName,
+          category: orderData.category || 'legal',
+          stamp_duty_value: orderData.stampDutyValue || 500,
+          status: 'decrypted',
+          legal_data: orderData.legalData || null,
+          registration_data: orderData.registrationData || null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          source: 'Website A'
+        })
+      }).catch(() => {});
+    } catch {}
+  }
 
   res.json({
     status: 'acknowledged',

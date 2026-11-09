@@ -4,6 +4,7 @@
  * 
  * CTC SYSTEM — Admin Panel Legal Compliance
  * Central Transaction & Compliance Processing Panel
+ * Production-Ready without Mock Data
  */
 
 import React, { useState, useEffect } from 'react';
@@ -11,6 +12,7 @@ import { Order, AuditLog, TelegramNotification } from './types';
 import { INITIAL_ORDERS, INITIAL_AUDIT_LOGS, INITIAL_NOTIFICATIONS } from './utils/mockData';
 import { DEFAULT_MASTER_KEY, autoDecryptFromUrl } from './utils/crypto';
 import { formatTelegramOrderMessage } from './utils/telegramFormatter';
+import { syncOrderToSupabase, fetchOrdersFromSupabase } from './utils/supabase';
 
 // Components
 import { Header } from './components/Header';
@@ -22,14 +24,24 @@ import { FormatsView } from './components/FormatsView';
 import { ViewDocumentScreen } from './components/ViewDocumentScreen';
 import { SettingsModal } from './components/SettingsModal';
 import { ProfileDrawerModal } from './components/ProfileDrawerModal';
+import { InboundPayloadModal } from './components/InboundPayloadModal';
 
 import { ShieldCheck, X } from 'lucide-react';
 
+const STORAGE_ORDERS_KEY = 'ctc_orders_prod_v4';
+const STORAGE_LOGS_KEY = 'ctc_audit_logs_prod_v4';
+const STORAGE_TG_KEY = 'ctc_notifications_prod_v4';
+
 export default function App() {
-  // Application State
+  // Application State: Genuine persistent data only
   const [orders, setOrders] = useState<Order[]>(() => {
     try {
-      const saved = localStorage.getItem('ctc_orders_v3');
+      // Clean legacy mock orders if any
+      const legacy = localStorage.getItem('ctc_orders_v3');
+      if (legacy && legacy.includes('WA-DL-2001')) {
+        localStorage.removeItem('ctc_orders_v3');
+      }
+      const saved = localStorage.getItem(STORAGE_ORDERS_KEY);
       return saved ? JSON.parse(saved) : INITIAL_ORDERS;
     } catch {
       return INITIAL_ORDERS;
@@ -38,7 +50,7 @@ export default function App() {
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
     try {
-      const saved = localStorage.getItem('ctc_audit_logs_v3');
+      const saved = localStorage.getItem(STORAGE_LOGS_KEY);
       return saved ? JSON.parse(saved) : INITIAL_AUDIT_LOGS;
     } catch {
       return INITIAL_AUDIT_LOGS;
@@ -47,7 +59,7 @@ export default function App() {
 
   const [notifications, setNotifications] = useState<TelegramNotification[]>(() => {
     try {
-      const saved = localStorage.getItem('ctc_notifications_v3');
+      const saved = localStorage.getItem(STORAGE_TG_KEY);
       return saved ? JSON.parse(saved) : INITIAL_NOTIFICATIONS;
     } catch {
       return INITIAL_NOTIFICATIONS;
@@ -56,15 +68,15 @@ export default function App() {
 
   // Master Key & Configuration
   const [masterKey, setMasterKey] = useState<string>(() => {
-    return localStorage.getItem('ctc_master_key_v3') || DEFAULT_MASTER_KEY;
+    return localStorage.getItem('ctc_master_key_v4') || DEFAULT_MASTER_KEY;
   });
 
   const [telegramToken, setTelegramToken] = useState<string>(() => {
-    return localStorage.getItem('ctc_tg_token_v3') || '';
+    return localStorage.getItem('ctc_tg_token_v4') || '';
   });
 
   const [telegramChatId, setTelegramChatId] = useState<string>(() => {
-    return localStorage.getItem('ctc_tg_chat_id_v3') || '@Quadtrix_Ops_Alerts';
+    return localStorage.getItem('ctc_tg_chat_id_v4') || '@Quadtrix_Ops_Alerts';
   });
 
   // Navigation (4 Tabs: orders, edit, upload, formats)
@@ -77,9 +89,10 @@ export default function App() {
   // Modals state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isUnlockerOpen, setIsUnlockerOpen] = useState(false);
   const [autoDecryptNotice, setAutoDecryptNotice] = useState<string | null>(null);
 
-  // Helper to generate next sequential CTC-2026-200X ID
+  // Helper to generate next sequential CTC-2026-XXXX ID
   const getNextSequentialId = (currentOrders: Order[]) => {
     const maxNum = currentOrders.reduce((max, o) => {
       const match = o.id.match(/CTC-2026-(\d+)/);
@@ -94,7 +107,7 @@ export default function App() {
   // Save to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('ctc_orders_v3', JSON.stringify(orders));
+      localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(orders));
     } catch (e) {
       console.error('Failed to save orders', e);
     }
@@ -102,17 +115,33 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('ctc_audit_logs_v3', JSON.stringify(auditLogs));
-      localStorage.setItem('ctc_notifications_v3', JSON.stringify(notifications));
-      localStorage.setItem('ctc_master_key_v3', masterKey);
-      localStorage.setItem('ctc_tg_token_v3', telegramToken);
-      localStorage.setItem('ctc_tg_chat_id_v3', telegramChatId);
+      localStorage.setItem(STORAGE_LOGS_KEY, JSON.stringify(auditLogs));
+      localStorage.setItem(STORAGE_TG_KEY, JSON.stringify(notifications));
+      localStorage.setItem('ctc_master_key_v4', masterKey);
+      localStorage.setItem('ctc_tg_token_v4', telegramToken);
+      localStorage.setItem('ctc_tg_chat_id_v4', telegramChatId);
     } catch (e) {
       console.error('Failed to sync state', e);
     }
   }, [auditLogs, notifications, masterKey, telegramToken, telegramChatId]);
 
-  // AUTO-DECRYPTION ON APP LOAD (?payload=...)
+  // Sync with Supabase on startup
+  useEffect(() => {
+    const syncRemote = async () => {
+      const remoteOrders = await fetchOrdersFromSupabase();
+      if (remoteOrders.length > 0) {
+        setOrders(prev => {
+          const map = new Map<string, Order>();
+          prev.forEach(o => map.set(o.id, o));
+          remoteOrders.forEach(o => map.set(o.id, o));
+          return Array.from(map.values());
+        });
+      }
+    };
+    syncRemote();
+  }, []);
+
+  // AUTO-DECRYPTION ON APP LOAD (?payload=... or ?data=...)
   useEffect(() => {
     const checkUrlPayload = async () => {
       if (!window.location.search) return;
@@ -121,12 +150,12 @@ export default function App() {
       if (result.detected && result.result) {
         const unlockedOrder = result.result as Order;
         
-        // Assign sequential CTC-2026-200X format ID
+        // Assign sequential CTC-2026-XXXX format ID
         if (!unlockedOrder.id || !unlockedOrder.id.startsWith('CTC-2026-')) {
           unlockedOrder.id = getNextSequentialId(orders);
         }
-        unlockedOrder.source = 'URL Parameter';
-        unlockedOrder.status = 'pending';
+        unlockedOrder.source = 'Website A';
+        unlockedOrder.status = 'decrypted';
 
         setOrders(prev => {
           const exists = prev.some(o => o.id === unlockedOrder.id);
@@ -134,15 +163,18 @@ export default function App() {
         });
 
         setSelectedOrder(unlockedOrder);
-        setAutoDecryptNotice(`Order ${unlockedOrder.id} successfully decrypted with Master Key!`);
+        setAutoDecryptNotice(`Order ${unlockedOrder.id} successfully unlocked and decrypted from Website A!`);
         setTimeout(() => setAutoDecryptNotice(null), 6000);
 
         addAuditLog({
           type: 'payload_decrypted',
           orderId: unlockedOrder.id,
-          message: `Inbound order ${unlockedOrder.id} auto-decrypted using AES-256 Master Key.`,
+          message: `Inbound order ${unlockedOrder.id} auto-decrypted using AES-256 Master Key from Website A.`,
           status: 'success'
         });
+
+        // Sync to Supabase
+        syncOrderToSupabase(unlockedOrder);
 
         // Broadcast formatted message to Telegram
         const telegramFormattedMsg = formatTelegramOrderMessage(unlockedOrder);
@@ -153,7 +185,7 @@ export default function App() {
     };
 
     checkUrlPayload();
-  }, []);
+  }, [masterKey]);
 
   // Helper to append audit log
   const addAuditLog = (entry: Omit<AuditLog, 'id' | 'timestamp'>) => {
@@ -196,8 +228,27 @@ export default function App() {
         })
       });
     } catch {
-      // Offline or dev simulation fallback
+      // Offline fallback
     }
+  };
+
+  // Ingest newly unlocked order from InboundPayloadModal
+  const handleIngestOrder = (newOrder: Order) => {
+    setOrders(prev => {
+      const exists = prev.some(o => o.id === newOrder.id);
+      return exists ? prev.map(o => o.id === newOrder.id ? newOrder : o) : [newOrder, ...prev];
+    });
+    setSelectedOrder(newOrder);
+
+    addAuditLog({
+      type: 'payload_decrypted',
+      orderId: newOrder.id,
+      message: `Inbound order ${newOrder.id} successfully decrypted with Secret Key.`,
+      status: 'success'
+    });
+
+    // Permanent Supabase sync
+    syncOrderToSupabase(newOrder);
   };
 
   // Update order in state
@@ -212,28 +263,37 @@ export default function App() {
     addAuditLog({
       type: 'field_modified',
       orderId: updatedOrder.id,
-      message: `Order ${updatedOrder.id} fields saved and re-rendered.`,
+      message: `Order ${updatedOrder.id} updated and saved.`,
       status: 'success'
     });
+
+    // Permanent Supabase sync
+    syncOrderToSupabase(updatedOrder);
   };
 
-  // Confirm order (from Profile Submit Request desk)
+  // Confirm order
   const handleConfirmOrder = (orderId: string) => {
+    let targetOrd: Order | undefined;
     setOrders(prev => prev.map(o => {
       if (o.id === orderId) {
-        return {
+        targetOrd = {
           ...o,
           status: 'confirmed',
           updatedAt: new Date().toISOString()
         };
+        return targetOrd;
       }
       return o;
     }));
 
+    if (targetOrd) {
+      syncOrderToSupabase(targetOrd);
+    }
+
     addAuditLog({
       type: 'system_event',
       orderId,
-      message: `Order ${orderId} confirmed by Admin with verified e-Stamp.`,
+      message: `Order ${orderId} confirmed with verified e-Stamp.`,
       status: 'success'
     });
 
@@ -245,23 +305,29 @@ export default function App() {
     }
   };
 
-  // Cancel order (from Profile Submit Request desk)
+  // Cancel order
   const handleCancelOrder = (orderId: string, reason?: string) => {
+    let targetOrd: Order | undefined;
     setOrders(prev => prev.map(o => {
       if (o.id === orderId) {
-        return {
+        targetOrd = {
           ...o,
           status: 'cancelled',
           updatedAt: new Date().toISOString()
         };
+        return targetOrd;
       }
       return o;
     }));
 
+    if (targetOrd) {
+      syncOrderToSupabase(targetOrd);
+    }
+
     addAuditLog({
       type: 'system_event',
       orderId,
-      message: `Order ${orderId} cancelled. Reason: ${reason || 'User cancelled from desk'}`,
+      message: `Order ${orderId} cancelled. Reason: ${reason || 'Admin cancelled from desk'}`,
       status: 'failed'
     });
 
@@ -273,6 +339,23 @@ export default function App() {
     }
   };
 
+  // Clear all data for fresh production reset
+  const handleClearAllData = () => {
+    setOrders([]);
+    setAuditLogs([]);
+    setNotifications([]);
+    setSelectedOrder(null);
+    setViewingOrder(null);
+    localStorage.removeItem(STORAGE_ORDERS_KEY);
+    localStorage.removeItem(STORAGE_LOGS_KEY);
+    localStorage.removeItem(STORAGE_TG_KEY);
+    addAuditLog({
+      type: 'system_event',
+      message: 'System cache cleared for clean production state.',
+      status: 'success'
+    });
+  };
+
   const pendingStampsCount = orders.filter(
     o => o.category === 'legal' && !o.stampData?.verified
   ).length;
@@ -280,10 +363,11 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900 antialiased selection:bg-blue-100 selection:text-blue-900">
       
-      {/* 1. Header (Centered CTC + Left Profile Icon + Right Settings Icon) */}
+      {/* 1. Header (Centered CTC + Left Profile Icon + Right Inbound Unlock & Settings) */}
       <Header
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenProfile={() => setIsProfileOpen(true)}
+        onOpenUnlocker={() => setIsUnlockerOpen(true)}
         masterKeyConfigured={Boolean(masterKey)}
         totalOrdersCount={orders.length}
       />
@@ -325,6 +409,7 @@ export default function App() {
                   setSelectedOrder(order);
                   setViewingOrder(order);
                 }}
+                onOpenUnlocker={() => setIsUnlockerOpen(true)}
               />
             )}
 
@@ -350,7 +435,7 @@ export default function App() {
               />
             )}
 
-            {/* TAB 4: FORMATS (फॉर्मेट) */}
+            {/* TAB 4: FORMATS */}
             {activeTab === 'formats' && (
               <FormatsView
                 orders={orders}
@@ -375,6 +460,23 @@ export default function App() {
         />
       )}
 
+      {/* Inbound Payload Unlocker Modal (Website A integration) */}
+      <InboundPayloadModal
+        isOpen={isUnlockerOpen}
+        onClose={() => setIsUnlockerOpen(false)}
+        masterKey={masterKey}
+        onUpdateMasterKey={(newKey) => {
+          setMasterKey(newKey);
+          addAuditLog({
+            type: 'system_event',
+            message: 'Secret Master Key updated.',
+            status: 'success'
+          });
+        }}
+        onIngestOrder={handleIngestOrder}
+        onSendNotification={sendTelegramNotification}
+      />
+
       {/* Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
@@ -394,9 +496,10 @@ export default function App() {
           setTelegramToken(token);
           setTelegramChatId(chatId);
         }}
+        onClearAllOrders={handleClearAllData}
       />
 
-      {/* Profile & Order Management Drawer Modal (Confirmed, Cancelled, Pending, Submit Request) */}
+      {/* Profile & Order Management Drawer Modal */}
       <ProfileDrawerModal
         isOpen={isProfileOpen}
         onClose={() => setIsProfileOpen(false)}

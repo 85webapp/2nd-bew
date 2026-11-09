@@ -140,6 +140,15 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
         {/* ===================== E-STAMP HEADER BLOCK ===================== */}
         {stampData ? (
           <div className="mb-8 border-2 border-slate-900 p-4 bg-amber-50/20 text-xs font-mono">
+            {stampData.scanUrl && (
+              <div className="mb-3 border-b border-slate-800 pb-3 text-center">
+                <img
+                  src={stampData.scanUrl}
+                  alt="Government e-Stamp Certificate"
+                  className="max-h-[220px] mx-auto object-contain rounded border border-slate-300 bg-white"
+                />
+              </div>
+            )}
             {/* National Emblem & Title Header */}
             <div className="text-center border-b border-slate-800 pb-3 mb-3">
               <div className="text-[10px] tracking-widest uppercase font-bold text-slate-700">
