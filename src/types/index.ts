@@ -38,6 +38,9 @@ export interface EStampData {
   article: string;                 // e.g. Article 5(c) Agreement or Memorandum
   state: string;                   // e.g. Delhi, Maharashtra, Karnataka, Uttar Pradesh
   scanUrl?: string;                // e-Stamp digital scan image/PDF preview
+  pdfUrl?: string;                 // Generated Legal PDF download URL
+  provider?: string;               // Cloudinary or Local Document Store
+  eStampPaperUrl?: string;         // Uploaded e-Stamp scanned paper
   verified: boolean;
   verifiedAt?: string;
 }
@@ -201,8 +204,13 @@ export interface Order {
     certificateHash?: string;
   };
 
+  // Uploaded media & photos from Website A
+  photoUrl?: string;
+  mediaUrls?: string[];
+  rawPayload?: any;
+
   // Webhook / Ingestion metadata
-  source: 'Website A' | 'API Direct' | 'URL Parameter' | 'Manual Ingestion';
+  source: 'Website A' | 'API Direct' | 'URL Parameter' | 'Manual Ingestion' | string;
   signatureVerified: boolean;
 }
 

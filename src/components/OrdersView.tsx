@@ -246,7 +246,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       <span className="font-mono font-medium text-slate-900">{contactPhone}</span>
                     </div>
 
-                    <div className="pt-1">
+                    <div className="pt-1 flex flex-wrap items-center gap-2">
                       {hasStamp ? (
                         <div className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
@@ -256,6 +256,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         <div className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-full">
                           <Clock className="w-3.5 h-3.5 text-amber-600" />
                           <span>e-Stamp Pending</span>
+                        </div>
+                      )}
+                      {order.photoUrl && (
+                        <div className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                          <span>Photo Attached</span>
                         </div>
                       )}
                     </div>

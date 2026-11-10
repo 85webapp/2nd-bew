@@ -125,9 +125,27 @@ export default function App() {
     }
   }, [auditLogs, notifications, masterKey, telegramToken, telegramChatId]);
 
-  // Sync with Supabase on startup
+  // Sync with Backend Server & Supabase on startup and periodic interval
   useEffect(() => {
     const syncRemote = async () => {
+      try {
+        const serverRes = await fetch('/api/orders');
+        if (serverRes.ok) {
+          const serverData = await serverRes.json();
+          if (serverData.success && Array.isArray(serverData.orders) && serverData.orders.length > 0) {
+            setOrders(prev => {
+              const map = new Map<string, Order>();
+              prev.forEach(o => map.set(o.id, o));
+              serverData.orders.forEach((o: Order) => map.set(o.id, o));
+              return Array.from(map.values());
+            });
+            return;
+          }
+        }
+      } catch {
+        // server fetch fallback
+      }
+
       const remoteOrders = await fetchOrdersFromSupabase();
       if (remoteOrders.length > 0) {
         setOrders(prev => {
@@ -138,7 +156,10 @@ export default function App() {
         });
       }
     };
+
     syncRemote();
+    const interval = setInterval(syncRemote, 8000);
+    return () => clearInterval(interval);
   }, []);
 
   // AUTO-DECRYPTION ON APP LOAD (?payload=... or ?data=...)

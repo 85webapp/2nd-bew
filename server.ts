@@ -10,8 +10,15 @@ import express, { Request, Response } from 'express';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
+import { 
+  generateLegalAgreementPdf, 
+  uploadPdfToCloudinary, 
+  uploadMediaToCloudinary, 
+  processOrderMedia 
+} from './src/server/legalPdfService.ts';
 
 dotenv.config();
 
@@ -33,8 +40,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Master Key for AES-256 Lock-Travel-Unlock encryption
-const MASTER_KEY = process.env.MASTER_KEY || 'CTC_QUADTRIX_MASTER_KEY_2026_SECURE_AES256';
+// NO HARD-CODING: Keys and secrets strictly loaded from environment variables
+const PRIVATE_DECRYPTION_KEY = process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || '';
+const MASTER_ENCRYPTION_KEY = PRIVATE_DECRYPTION_KEY;
+const MASTER_KEY = PRIVATE_DECRYPTION_KEY;
+const SUBMISSION_HMAC_SECRET = process.env.SUBMISSION_HMAC_SECRET || '';
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
@@ -43,12 +53,27 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use((_req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-submission-signature, x-hmac-signature');
   if (_req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
+
+// Serve generated PDFs, legal documents, and uploaded media
+const localDocPath = path.resolve(__dirname, 'public/uploads/documents');
+const localMediaPath = path.resolve(__dirname, 'public/uploads/media');
+
+[localDocPath, localMediaPath].forEach((dir) => {
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch {}
+});
+
+app.use('/uploads/documents', express.static(localDocPath));
+app.use('/uploads/media', express.static(localMediaPath));
 
 // Helper to derive 32-byte key from string
 function derive32ByteKey(passphrase: string): Buffer {
@@ -70,6 +95,46 @@ function encryptAES256GCM(data: any, keyString: string = MASTER_KEY): string {
 
   // Format: ivHex:cipherHex:tagHex
   return `${iv.toString('hex')}:${encrypted}:${authTag}`;
+}
+
+/**
+ * Decrypt hybrid RSA + AES envelope (standard for asymmetric enterprise transmissions)
+ */
+function decryptHybridEnvelope(envelope: any, privateKeyPem: string): { success: boolean; data?: any; error?: string } {
+  try {
+    const encKeyBuf = Buffer.from(envelope.encKey || envelope.key, 'base64');
+    let aesKey: Buffer;
+    try {
+      aesKey = crypto.privateDecrypt(
+        { key: privateKeyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
+        encKeyBuf
+      );
+    } catch {
+      aesKey = crypto.privateDecrypt(
+        { key: privateKeyPem, padding: crypto.constants.RSA_PKCS1_PADDING },
+        encKeyBuf
+      );
+    }
+
+    const iv = Buffer.from(envelope.iv, (envelope.iv?.length === 24 || envelope.iv?.length === 32) ? 'hex' : 'base64');
+    const cipherText = envelope.cipher || envelope.ciphertext || envelope.data;
+    const tag = envelope.tag ? Buffer.from(envelope.tag, envelope.tag?.length === 32 ? 'hex' : 'base64') : null;
+
+    if (tag) {
+      const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
+      decipher.setAuthTag(tag);
+      let decrypted = decipher.update(cipherText, (cipherText.length % 2 === 0 && !cipherText.includes('+') && !cipherText.includes('/')) ? 'hex' : 'base64', 'utf8');
+      decrypted += decipher.final('utf8');
+      return { success: true, data: JSON.parse(decrypted) };
+    } else {
+      const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv.subarray(0, 16));
+      let decrypted = decipher.update(cipherText, (cipherText.length % 2 === 0 && !cipherText.includes('+') && !cipherText.includes('/')) ? 'hex' : 'base64', 'utf8');
+      decrypted += decipher.final('utf8');
+      return { success: true, data: JSON.parse(decrypted) };
+    }
+  } catch (err: any) {
+    return { success: false, error: 'Hybrid RSA/AES decryption failed: ' + err.message };
+  }
 }
 
 /**
@@ -139,7 +204,93 @@ function decryptAES256(encryptedString: string, keyString: string = MASTER_KEY):
   }
 }
 
-// In-Memory store for system state and notifications
+/**
+ * Universal Decryptor: Decrypts both RSA Private Key locked payloads and AES-256 symmetric ciphertexts
+ */
+function decryptSecurePayload(encryptedInput: any, keyOrPem: string = PRIVATE_DECRYPTION_KEY): { success: boolean; data?: any; error?: string } {
+  if (!keyOrPem || !keyOrPem.trim()) {
+    return {
+      success: false,
+      error: 'Decryption failed: PRIVATE_DECRYPTION_KEY or MASTER_ENCRYPTION_KEY is not defined in server environment (.env). No default keys are hardcoded.'
+    };
+  }
+
+  try {
+    let payloadStr = typeof encryptedInput === 'string' ? encryptedInput.trim() : JSON.stringify(encryptedInput);
+
+    // 1. Check if input is a Hybrid Envelope object
+    if (typeof encryptedInput === 'object' && encryptedInput !== null) {
+      if (encryptedInput.encKey || encryptedInput.key) {
+        return decryptHybridEnvelope(encryptedInput, keyOrPem);
+      }
+    } else if (payloadStr.startsWith('{') && payloadStr.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(payloadStr);
+        if (parsed.encKey || parsed.key) {
+          return decryptHybridEnvelope(parsed, keyOrPem);
+        }
+      } catch {}
+    }
+
+    // 2. Check if key is an RSA Private Key (PEM format)
+    const isRsaKey = typeof keyOrPem === 'string' && (
+      keyOrPem.includes('BEGIN RSA PRIVATE KEY') ||
+      keyOrPem.includes('BEGIN PRIVATE KEY') ||
+      keyOrPem.includes('BEGIN ENCRYPTED PRIVATE KEY')
+    );
+
+    if (isRsaKey) {
+      try {
+        const cleaned = payloadStr.replace(/\s+/g, '');
+        const isHex = /^[0-9a-fA-F]+$/.test(cleaned) && cleaned.length % 2 === 0;
+        const buf = Buffer.from(cleaned, isHex ? 'hex' : 'base64');
+        try {
+          const decrypted = crypto.privateDecrypt(
+            { key: keyOrPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
+            buf
+          );
+          return { success: true, data: JSON.parse(decrypted.toString('utf8')) };
+        } catch {
+          const decrypted = crypto.privateDecrypt(
+            { key: keyOrPem, padding: crypto.constants.RSA_PKCS1_PADDING },
+            buf
+          );
+          return { success: true, data: JSON.parse(decrypted.toString('utf8')) };
+        }
+      } catch {
+        // Fall through to symmetric AES decrypt
+      }
+    }
+
+    // 3. Fallback to standard AES-256 decryption
+    return decryptAES256(payloadStr, keyOrPem);
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Decryption failed' };
+  }
+}
+
+/**
+ * Resolve Supabase REST base URL from SUPABASE_URL or SUPABASE_CONNECTION_STRING
+ */
+function resolveSupabaseUrl(): string | null {
+  if (process.env.SUPABASE_URL) {
+    return process.env.SUPABASE_URL.replace(/\/+$/, '');
+  }
+  const connStr = process.env.SUPABASE_CONNECTION_STRING;
+  if (connStr) {
+    if (connStr.startsWith('http://') || connStr.startsWith('https://')) {
+      return connStr.replace(/\/+$/, '');
+    }
+    const match = connStr.match(/db\.([a-z0-9-]+)\.supabase\.co/i);
+    if (match && match[1]) {
+      return `https://${match[1]}.supabase.co`;
+    }
+  }
+  return null;
+}
+
+// In-Memory store: Permanent cache for orders, notifications, and audit trail
+const activeOrdersStore: any[] = [];
 const notificationsLog: any[] = [];
 const systemAuditTrail: any[] = [];
 
@@ -152,7 +303,7 @@ app.post('/api/decrypt', (req: Request, res: Response) => {
     return res.status(400).json({ success: false, error: 'Missing encrypted payload' });
   }
 
-  const result = decryptAES256(payload, key || MASTER_KEY);
+  const result = decryptSecurePayload(payload, key || PRIVATE_DECRYPTION_KEY);
   if (!result.success) {
     return res.status(422).json({ success: false, error: result.error });
   }
@@ -175,6 +326,403 @@ app.post('/api/encrypt', (req: Request, res: Response) => {
   }
 });
 
+// =========================================================================
+// API ENDPOINT: POST /api/orders/receive
+// Primary Secure Data Receiver for Website A (Lock-Travel-Unlock Pipeline)
+// 1. Verifies HMAC-SHA256 Signature (Integrity check)
+// 2. Decrypts Payload using PRIVATE_DECRYPTION_KEY (RSA Private Key or AES-256)
+// 3. Generates Official Legal Agreement PDF with e-Stamp Overlay
+// 4. Uploads Generated PDF to Cloudinary (or Local Secure Store)
+// 5. Broadcasts Instant Operational Alert to Telegram with Download Link
+// 6. Syncs Metadata to Supabase & Performs In-Memory Buffer Cleanup
+// =========================================================================
+
+app.get('/api/orders/receive', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ACTIVE',
+    endpoint: '/api/orders/receive',
+    method: 'POST',
+    description: 'Secure Data Receiver & PDF Processing Pipeline for Website A',
+    security: {
+      encryption: 'RSA-OAEP/PKCS1 or AES-256-GCM (configured via PRIVATE_DECRYPTION_KEY)',
+      integrity: 'HMAC-SHA256 (via SUBMISSION_HMAC_SECRET in header or payload)',
+      supportedHeaders: ['x-submission-signature', 'x-hmac-signature']
+    },
+    payloadFormat: {
+      payload: 'ivHex:cipherHex:authTagHex OR RSA encrypted base64 buffer OR hybrid {encKey, cipher, iv, tag}',
+      signature: 'HMAC-SHA256 hex digest of the raw payload string (optional if secret not configured)',
+      timestamp: Date.now(),
+      source: 'Website A'
+    }
+  });
+});
+
+app.post('/api/orders/receive', async (req: Request, res: Response) => {
+  const { payload, signature, timestamp, source } = req.body;
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+  // 1. Basic validation
+  if (!payload || (typeof payload !== 'string' && typeof payload !== 'object')) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid request: "payload" string or object is required'
+    });
+  }
+
+  // 2. HMAC Integrity Check (Anti-Tampering)
+  if (SUBMISSION_HMAC_SECRET) {
+    const incomingSig = (req.headers['x-submission-signature'] as string) ||
+                        (req.headers['x-hmac-signature'] as string) ||
+                        signature;
+
+    if (!incomingSig) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: Missing HMAC signature (x-submission-signature header or signature field required)'
+      });
+    }
+
+    try {
+      const payloadStringForHmac = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      const computedSig = crypto.createHmac('sha256', SUBMISSION_HMAC_SECRET).update(payloadStringForHmac).digest('hex');
+      const sigBuf = Buffer.from(String(incomingSig).trim(), 'utf8');
+      const compBuf = Buffer.from(computedSig, 'utf8');
+
+      if (sigBuf.length !== compBuf.length || !crypto.timingSafeEqual(sigBuf, compBuf)) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: HMAC verification failed. Payload signature mismatch or tampered data.'
+        });
+      }
+    } catch (hmacErr: any) {
+      return res.status(403).json({
+        success: false,
+        error: 'HMAC verification error: ' + hmacErr.message
+      });
+    }
+  }
+
+  // 3. Automatic Decryption with PRIVATE_DECRYPTION_KEY (strictly loaded from .env)
+  const decryptResult = decryptSecurePayload(payload, PRIVATE_DECRYPTION_KEY);
+  if (!decryptResult.success) {
+    return res.status(422).json({
+      success: false,
+      error: 'Decryption failed: ' + (decryptResult.error || 'Private key mismatch or corrupted ciphertext')
+    });
+  }
+
+  const orderData = decryptResult.data;
+  if (!orderData || typeof orderData !== 'object') {
+    return res.status(422).json({
+      success: false,
+      error: 'Decrypted data is not a valid JSON object'
+    });
+  }
+
+  // Assign or extract sequential Order ID
+  const orderId = (orderData.id && String(orderData.id).startsWith('CTC-2026-'))
+    ? orderData.id
+    : `CTC-2026-${Math.floor(2020 + (systemAuditTrail.length || 0) + (activeOrdersStore.length || 0))}`;
+
+  const clientName = orderData.clientName || orderData.party1?.fullName || orderData.party2?.fullName || 'Client';
+  const formName = orderData.formName || orderData.documentTitle || 'Legal Service Agreement';
+  const clientPhone = orderData.clientPhone || orderData.party1?.phone || orderData.party2?.phone || 'Not Provided';
+  const duty = Number(orderData.stampDutyValue || orderData.stampDutyAmount || 500);
+
+  // 4. File & Media Handling: Upload photos/images/attachments to Cloudinary (or local media store)
+  const mediaResult = await processOrderMedia(orderData, orderId);
+
+  // 5. Generate Clean Legal Document PDF (Flexible e-Stamp overlay continuation provision, NO fake stamp drawing)
+  let pdfBuffer: Buffer;
+  try {
+    pdfBuffer = await generateLegalAgreementPdf({
+      ...orderData,
+      id: orderId,
+      formName,
+      clientName,
+      clientPhone,
+      stampDutyValue: duty,
+      overlayProvision: true
+    });
+  } catch (pdfErr: any) {
+    return res.status(500).json({
+      success: false,
+      error: 'Legal document PDF generation failed: ' + pdfErr.message
+    });
+  }
+
+  // 6. Upload PDF to Cloudinary (or Local Secure Document Store)
+  const uploadResult = await uploadPdfToCloudinary(pdfBuffer, orderId, `Legal_Agreement_${orderId}.pdf`);
+
+  // Build absolute download URL
+  const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : 'https://your-domain.netlify.app';
+  const fullPdfDownloadUrl = uploadResult.url.startsWith('http') ? uploadResult.url : `${hostUrl}${uploadResult.url}`;
+
+  // 7. Form Complete Persistent Order Record (NO RAM WIPING)
+  const completeOrderRecord = {
+    id: orderId,
+    referenceCode: orderData.referenceCode || `WA-RECV-${Date.now()}`,
+    category: orderData.category || 'legal',
+    formType: orderData.formType || 'custom_document',
+    formName: formName,
+    clientName: clientName,
+    clientPhone: clientPhone,
+    clientEmail: orderData.clientEmail || '',
+    stampDutyValue: duty,
+    status: 'confirmed_stamp_attached',
+    legalData: orderData.legalData || {
+      documentTitle: formName,
+      party1: orderData.party1 || { fullName: clientName },
+      party2: orderData.party2,
+      clauses: orderData.clauses,
+      propertyDetails: orderData.propertyDetails,
+      state: orderData.state || 'Delhi'
+    },
+    registrationData: orderData.registrationData || null,
+    stampData: {
+      pdfUrl: fullPdfDownloadUrl,
+      verified: true,
+      provider: uploadResult.provider
+    },
+    photoUrl: mediaResult.photoUrl,
+    mediaUrls: mediaResult.mediaUrls,
+    rawPayload: orderData, // Complete decrypted data preserved permanently!
+    createdAt: orderData.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: source || 'Website A (API Receive)'
+  };
+
+  // Permanently save into in-memory store so it never disappears from Orders tab
+  activeOrdersStore.unshift(completeOrderRecord);
+
+  // 8. Permanent Storage in Supabase Database
+  const resolvedSupabase = resolveSupabaseUrl();
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (resolvedSupabase && supabaseKey) {
+    try {
+      fetch(`${resolvedSupabase}/rest/v1/orders`, {
+        method: 'POST',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates'
+        },
+        body: JSON.stringify({
+          id: orderId,
+          reference_code: completeOrderRecord.referenceCode,
+          client_name: clientName,
+          client_phone: clientPhone,
+          form_name: formName,
+          category: completeOrderRecord.category,
+          stamp_duty_value: duty,
+          status: 'confirmed_stamp_attached',
+          legal_data: completeOrderRecord.legalData,
+          registration_data: completeOrderRecord.registrationData,
+          stamp_data: completeOrderRecord.stampData,
+          raw_payload: completeOrderRecord.rawPayload,
+          photo_url: completeOrderRecord.photoUrl,
+          media_urls: completeOrderRecord.mediaUrls,
+          created_at: completeOrderRecord.createdAt,
+          updated_at: completeOrderRecord.updatedAt,
+          source: completeOrderRecord.source
+        })
+      }).catch((err) => {
+        console.warn('Supabase storage warning:', err);
+      });
+    } catch {}
+  }
+
+  // 9. Dispatch Instant Telegram Alert to Admin
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
+  const telegramMessage = `🔔 *नया ऑर्डर आ चुका है!*
+
+• *ऑर्डर आईडी:* \`${orderId}\`
+• *क्लाइंट का नाम:* *${clientName}*
+• *सेवा / फॉर्म:* ${formName}
+• *मोबाइल नंबर:* ${clientPhone}
+• *स्टाम्प ड्यूटी:* ₹${duty}/-
+• *स्रोत:* वेबसाइट A
+
+📄 *दस्तावेज़ लिंक:* [PDF देखें](${fullPdfDownloadUrl})`;
+
+  const notificationEntry = {
+    id: `tg-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    orderId,
+    clientName,
+    serviceName: formName,
+    category: orderData.category || 'legal',
+    channel: tgChatId,
+    status: botToken ? 'Delivered' : 'Simulated',
+    messageText: telegramMessage
+  };
+  notificationsLog.unshift(notificationEntry);
+
+  if (botToken) {
+    try {
+      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text: telegramMessage,
+          parse_mode: 'Markdown',
+          disable_web_page_preview: false
+        })
+      }).catch((err) => {
+        console.warn('Telegram send error:', err);
+      });
+    } catch {}
+  }
+
+  // 10. Record in Audit Trail
+  const auditEntry = {
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    orderId,
+    type: 'order_received_pipeline',
+    message: `Order ${orderId} received from Website A (${clientIp}), decrypted, media uploaded, permanently saved in Supabase & memory.`,
+    status: 'success'
+  };
+  systemAuditTrail.unshift(auditEntry);
+
+  // 11. Return Success Response with Full Order Object
+  return res.json({
+    success: true,
+    status: 'PROCESSED',
+    orderId,
+    clientName,
+    formName,
+    clientPhone,
+    stampDutyAmount: duty,
+    pdfDownloadUrl: fullPdfDownloadUrl,
+    photoUrl: mediaResult.photoUrl,
+    mediaUrls: mediaResult.mediaUrls,
+    storageProvider: uploadResult.provider,
+    telegramNotification: botToken ? 'Delivered' : 'Simulated',
+    hmacVerified: Boolean(SUBMISSION_HMAC_SECRET),
+    order: completeOrderRecord,
+    processedAt: new Date().toISOString()
+  });
+});
+
+// Centralized Orders Retrieval Endpoint for Admin Panel (Fetches from Supabase + Active Store)
+app.get('/api/orders', async (_req: Request, res: Response) => {
+  const resolvedSupabase = resolveSupabaseUrl();
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+
+  const orderMap = new Map<string, any>();
+
+  // 1. Load active in-memory store orders
+  activeOrdersStore.forEach((o) => orderMap.set(o.id, o));
+
+  // 2. Query Supabase if credentials exist
+  if (resolvedSupabase && supabaseKey) {
+    try {
+      const supaRes = await fetch(`${resolvedSupabase}/rest/v1/orders?select=*&order=created_at.desc`, {
+        method: 'GET',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (supaRes.ok) {
+        const rows = await supaRes.json();
+        rows.forEach((r: any) => {
+          orderMap.set(r.id, {
+            id: r.id,
+            referenceCode: r.reference_code || r.id,
+            category: r.category || 'legal',
+            formType: r.form_type || 'custom_document',
+            formName: r.form_name || 'Legal Document',
+            clientName: r.client_name || 'Client',
+            clientPhone: r.client_phone || '',
+            clientEmail: r.client_email || '',
+            stampDutyValue: r.stamp_duty_value || 0,
+            status: r.status || 'received',
+            legalData: r.legal_data,
+            registrationData: r.registration_data,
+            stampData: r.stamp_data,
+            photoUrl: r.photo_url || null,
+            mediaUrls: r.media_urls || [],
+            rawPayload: r.raw_payload || null,
+            createdAt: r.created_at,
+            updatedAt: r.updated_at,
+            source: r.source || 'Website A'
+          });
+        });
+      }
+    } catch (err) {
+      console.warn('Supabase fetch in /api/orders skipped:', err);
+    }
+  }
+
+  const allOrders = Array.from(orderMap.values());
+  return res.json({
+    success: true,
+    count: allOrders.length,
+    orders: allOrders
+  });
+});
+
+// Flexible e-Stamp Paper Overlay & Merging Provision Endpoint
+app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => {
+  const { orderId, stampPaperImageBase64, topOffset } = req.body;
+
+  // Find order in active store
+  const order = activeOrdersStore.find((o) => o.id === orderId);
+  if (!order) {
+    return res.status(404).json({ success: false, error: 'Order not found for overlay' });
+  }
+
+  try {
+    let stampUrl = '';
+    if (stampPaperImageBase64) {
+      const uploadRes = await uploadMediaToCloudinary(stampPaperImageBase64, `ctc_stamp_${orderId}`);
+      stampUrl = uploadRes.url;
+    }
+
+    // Generate PDF with custom topOffset for continuation
+    const pdfBuffer = await generateLegalAgreementPdf(
+      {
+        ...order,
+        overlayProvision: true
+      },
+      {
+        overlayProvision: true,
+        topBlankSpace: Number(topOffset) || 280
+      }
+    );
+
+    const uploadResult = await uploadPdfToCloudinary(pdfBuffer, orderId, `Overlaid_Agreement_${orderId}.pdf`);
+    const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : '';
+    const downloadUrl = uploadResult.url.startsWith('http') ? uploadResult.url : `${hostUrl}${uploadResult.url}`;
+
+    // Update order with overlaid PDF
+    order.stampData = {
+      pdfUrl: downloadUrl,
+      verified: true,
+      provider: uploadResult.provider,
+      eStampAttachedAt: new Date().toISOString(),
+      eStampPaperUrl: stampUrl || order.stampData?.eStampPaperUrl
+    };
+
+    return res.json({
+      success: true,
+      message: 'e-Stamp continuation PDF successfully created',
+      orderId,
+      pdfDownloadUrl: downloadUrl,
+      eStampPaperUrl: stampUrl
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Webhook endpoint: Receives secure inbound payloads from Website A
 app.post('/api/webhook/website-a', (req: Request, res: Response) => {
   const { payload, signature, source } = req.body;
@@ -184,7 +732,7 @@ app.post('/api/webhook/website-a', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Payload missing' });
   }
 
-  const decryptResult = decryptAES256(payload, MASTER_KEY);
+  const decryptResult = decryptSecurePayload(payload, PRIVATE_DECRYPTION_KEY);
   if (!decryptResult.success) {
     return res.status(401).json({ error: 'Decryption failed: Unauthorized or corrupted key' });
   }

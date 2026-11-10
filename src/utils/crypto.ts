@@ -7,8 +7,8 @@
  * Lock-Travel-Unlock Flow with Master Key
  */
 
-// Default Master Key configured for Quadtrix / DOC India CTC System
-export const DEFAULT_MASTER_KEY = 'CTC_QUADTRIX_MASTER_KEY_2026_SECURE_AES256';
+// Master Key strictly loaded from environment variables (no hardcoding)
+export const DEFAULT_MASTER_KEY = (import.meta as any).env?.VITE_MASTER_ENCRYPTION_KEY || (import.meta as any).env?.VITE_PRIVATE_DECRYPTION_KEY || '';
 
 /**
  * Derives a 256-bit CryptoKey from passphrase using SHA-256

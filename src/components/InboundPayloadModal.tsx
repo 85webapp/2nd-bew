@@ -263,41 +263,49 @@ exit;
           ) : (
             <div className="space-y-4">
               <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2">
-                <span className="font-bold text-slate-800 block text-[11px] uppercase tracking-wider">
-                  1. Automatic Webhook Endpoint for Website A
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider">
+                    1. Primary Data Receiver Pipeline: POST /api/orders/receive
+                  </span>
+                  <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                    HMAC + AES-256 + PDF + Telegram
+                  </span>
+                </div>
                 <div className="flex items-center gap-2 bg-white p-2 rounded border border-gray-300 font-mono text-[11px]">
-                  <span className="flex-1 truncate text-slate-800">{webhookUrl}</span>
+                  <span className="flex-1 truncate text-slate-800">{currentOrigin}/api/orders/receive</span>
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(webhookUrl);
+                      navigator.clipboard.writeText(`${currentOrigin}/api/orders/receive`);
                       setCopiedWebhook(true);
                       setTimeout(() => setCopiedWebhook(false), 2000);
                     }}
                     className="p-1 hover:bg-slate-100 rounded text-slate-600"
-                    title="Copy Webhook URL"
+                    title="Copy Endpoint URL"
                   >
                     {copiedWebhook ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
+                <p className="text-[11px] text-slate-500">
+                  Sends encrypted payload with optional HMAC signature. Server automatically decrypts, generates legal PDF, uploads to Cloudinary, and notifies Telegram!
+                </p>
               </div>
 
               <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2">
                 <span className="font-bold text-slate-800 block text-[11px] uppercase tracking-wider">
-                  2. URL Redirect Link Format
+                  2. Alternative URL Redirect Method
                 </span>
                 <div className="bg-white p-2 rounded border border-gray-300 font-mono text-[11px] text-slate-700 break-all">
                   {redirectUrlTemplate}
                 </div>
                 <p className="text-[11px] text-slate-500">
-                  When Website A redirects the user with <code>?payload=...</code>, this application immediately auto-decrypts without manual interaction!
+                  When Website A redirects the client browser with <code>?payload=...</code>, this application immediately auto-decrypts without manual password entry!
                 </p>
               </div>
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider">
-                    3. Code Example for Website A (PHP / Node / Python)
+                    3. Website A Integration Code (PHP / cURL)
                   </span>
                   <button
                     onClick={() => {
@@ -308,10 +316,10 @@ exit;
                     className="text-[11px] font-bold text-blue-600 flex items-center gap-1 hover:underline"
                   >
                     {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedCode ? 'Copied' : 'Copy PHP Snippet'}</span>
+                    <span>{copiedCode ? 'Copied' : 'Copy Code Snippet'}</span>
                   </button>
                 </div>
-                <pre className="p-3 bg-slate-900 text-slate-200 rounded-xl font-mono text-[10px] overflow-x-auto max-h-40 leading-relaxed">
+                <pre className="p-3 bg-slate-900 text-slate-200 rounded-xl font-mono text-[10px] overflow-x-auto max-h-48 leading-relaxed">
                   {phpSnippet}
                 </pre>
               </div>

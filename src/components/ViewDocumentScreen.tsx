@@ -47,7 +47,11 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
   };
 
   const handleDownloadPdf = () => {
-    window.print();
+    if (order.stampData?.pdfUrl) {
+      window.open(order.stampData.pdfUrl, '_blank');
+    } else {
+      window.print();
+    }
   };
 
   return (
@@ -70,15 +74,15 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
           <div className="flex items-center gap-2.5">
             <button
               onClick={handleDownloadPdf}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-gray-200 transition-colors"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-gray-200 transition-colors cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              <span>Download PDF</span>
+              <span>{order.stampData?.pdfUrl ? 'Open / Download PDF' : 'Download PDF'}</span>
             </button>
 
             <button
               onClick={handlePrint}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all active:scale-95"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all active:scale-95 cursor-pointer"
             >
               <Printer className="w-4 h-4" />
               <span>Print A4 Document</span>
@@ -133,6 +137,42 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
             )}
           </div>
         </div>
+
+        {/* Attached Photos & Media from Website A (Cloudinary / Store links) */}
+        {(order.photoUrl || (order.mediaUrls && order.mediaUrls.length > 0)) && (
+          <div className="border-t border-gray-100 pt-3">
+            <span className="text-xs font-bold text-slate-700 block mb-2">Attached Photos & Media:</span>
+            <div className="flex flex-wrap gap-2.5 items-center">
+              {order.photoUrl && (
+                <a
+                  href={order.photoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="group relative block w-14 h-14 rounded-lg overflow-hidden border border-gray-200 hover:border-blue-500 bg-slate-100 shadow-2xs"
+                >
+                  <img src={order.photoUrl} alt="Attached Document" className="w-full h-full object-cover" />
+                  <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-[9px] text-white font-bold transition-opacity">
+                    View
+                  </span>
+                </a>
+              )}
+              {order.mediaUrls?.filter(u => u !== order.photoUrl).map((url, idx) => (
+                <a
+                  key={idx}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="group relative block w-14 h-14 rounded-lg overflow-hidden border border-gray-200 hover:border-blue-500 bg-slate-100 shadow-2xs"
+                >
+                  <img src={url} alt={`Attachment ${idx + 1}`} className="w-full h-full object-cover" />
+                  <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-[9px] text-white font-bold transition-opacity">
+                    #{idx + 1}
+                  </span>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ================= DOCUMENT RENDERING CONTENT ================= */}
