@@ -7,6 +7,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import cors from 'cors';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -50,15 +51,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 // Enable CORS for external Website A inbound requests and webhooks
-app.use((_req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-submission-signature, x-hmac-signature');
-  if (_req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
+app.use(cors());
 
 // Serve generated PDFs, legal documents, and uploaded media
 const localDocPath = path.resolve(__dirname, 'public/uploads/documents');
