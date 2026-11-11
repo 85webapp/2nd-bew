@@ -498,25 +498,11 @@ export default function App() {
         onSendNotification={sendTelegramNotification}
       />
 
-      {/* Settings Modal */}
+      {/* Settings Modal (Final Document & Environment Security) */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        masterKey={masterKey}
-        onUpdateMasterKey={(newKey) => {
-          setMasterKey(newKey);
-          addAuditLog({
-            type: 'system_event',
-            message: 'Master Key updated.',
-            status: 'success'
-          });
-        }}
-        telegramToken={telegramToken}
-        telegramChatId={telegramChatId}
-        onUpdateTelegramConfig={(token, chatId) => {
-          setTelegramToken(token);
-          setTelegramChatId(chatId);
-        }}
+        orders={orders}
         onClearAllOrders={handleClearAllData}
       />
 

@@ -16,13 +16,15 @@ interface DocumentRendererProps {
   onEditRequest?: () => void;
   onUploadStampRequest?: () => void;
   hideRibbon?: boolean;
+  showEStampOverlay?: boolean;
 }
 
 export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
   order,
   onEditRequest,
   onUploadStampRequest,
-  hideRibbon = false
+  hideRibbon = false,
+  showEStampOverlay = false
 }) => {
   const legalData = order.legalData;
   const stampData = order.stampData;
@@ -137,8 +139,8 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
         id="printable-legal-document"
         className="print-only-container bg-white border border-gray-200 rounded-xl shadow-lg max-w-[850px] mx-auto p-6 sm:p-12 font-legal text-slate-900 leading-relaxed text-sm sm:text-[15px]"
       >
-        {/* ===================== E-STAMP HEADER BLOCK ===================== */}
-        {stampData ? (
+        {/* ===================== E-STAMP OVERLAY HEADER BLOCK (FINAL DOCUMENT ONLY) ===================== */}
+        {showEStampOverlay && stampData ? (
           <div className="mb-8 border-2 border-slate-900 p-4 bg-amber-50/20 text-xs font-mono">
             {stampData.scanUrl && (
               <div className="mb-3 border-b border-slate-800 pb-3 text-center">

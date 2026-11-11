@@ -350,52 +350,67 @@ app.get('/api/orders/receive', (_req: Request, res: Response) => {
   });
 });
 
-app.post('/api/orders/receive', async (req: Request, res: Response) => {
-  const { payload, signature, timestamp, source } = req.body;
+// Central Order Reception Pipeline (Mounts on both /api/receive-order and /api/orders/receive)
+// Enforces STRICT STORAGE DISCIPLINE: Saves RAW DATA ONLY to Supabase & memory.
+// NEVER stores PDF files on disk or Cloudinary to prevent storage bloat.
+async function handleReceiveOrder(req: Request, res: Response) {
+  const rawBody = req.body || {};
+  const payload = rawBody.payload !== undefined ? rawBody.payload : rawBody;
+  const signature = rawBody.signature;
+  const timestamp = rawBody.timestamp || Date.now();
+  const source = rawBody.source || 'Website A';
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
   // 1. Basic validation
-  if (!payload || (typeof payload !== 'string' && typeof payload !== 'object')) {
+  if (!payload || (typeof payload !== 'string' && typeof payload !== 'object') || Object.keys(payload).length === 0) {
     return res.status(400).json({
       success: false,
       error: 'Invalid request: "payload" string or object is required'
     });
   }
 
-  // 2. HMAC Integrity Check (Anti-Tampering)
-  if (SUBMISSION_HMAC_SECRET) {
-    const incomingSig = (req.headers['x-submission-signature'] as string) ||
-                        (req.headers['x-hmac-signature'] as string) ||
-                        signature;
+  // 2. Security Check: HMAC Secret / Signature Verification
+  const websiteSecret = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET;
+  if (websiteSecret) {
+    const incomingHeader = (req.headers['x-hmac-secret'] as string) ||
+                           (req.headers['x-submission-signature'] as string) ||
+                           (req.headers['x-hmac-signature'] as string) ||
+                           (req.headers['authorization'] as string) ||
+                           signature;
 
-    if (!incomingSig) {
+    if (!incomingHeader) {
       return res.status(401).json({
         success: false,
-        error: 'Unauthorized: Missing HMAC signature (x-submission-signature header or signature field required)'
+        error: 'Unauthorized: Missing HMAC Secret / Signature in request headers (x-hmac-secret or x-submission-signature required).'
       });
     }
 
-    try {
-      const payloadStringForHmac = typeof payload === 'string' ? payload : JSON.stringify(payload);
-      const computedSig = crypto.createHmac('sha256', SUBMISSION_HMAC_SECRET).update(payloadStringForHmac).digest('hex');
-      const sigBuf = Buffer.from(String(incomingSig).trim(), 'utf8');
-      const compBuf = Buffer.from(computedSig, 'utf8');
+    const rawSecret = String(incomingHeader).replace(/^Bearer\s+/i, '').trim();
+    const isDirectSecretMatch = (rawSecret === websiteSecret);
 
-      if (sigBuf.length !== compBuf.length || !crypto.timingSafeEqual(sigBuf, compBuf)) {
+    if (!isDirectSecretMatch) {
+      try {
+        const payloadStringForHmac = typeof payload === 'string' ? payload : JSON.stringify(payload);
+        const computedSig = crypto.createHmac('sha256', websiteSecret).update(payloadStringForHmac).digest('hex');
+        const sigBuf = Buffer.from(rawSecret, 'utf8');
+        const compBuf = Buffer.from(computedSig, 'utf8');
+
+        if (sigBuf.length !== compBuf.length || !crypto.timingSafeEqual(sigBuf, compBuf)) {
+          return res.status(403).json({
+            success: false,
+            error: 'Forbidden: HMAC Secret or Signature mismatch. Rejected for security.'
+          });
+        }
+      } catch (hmacErr: any) {
         return res.status(403).json({
           success: false,
-          error: 'Forbidden: HMAC verification failed. Payload signature mismatch or tampered data.'
+          error: 'HMAC verification error: ' + hmacErr.message
         });
       }
-    } catch (hmacErr: any) {
-      return res.status(403).json({
-        success: false,
-        error: 'HMAC verification error: ' + hmacErr.message
-      });
     }
   }
 
-  // 3. Automatic Decryption with PRIVATE_DECRYPTION_KEY (strictly loaded from .env)
+  // 3. Automatic Decryption with PRIVATE_KEY / PRIVATE_DECRYPTION_KEY
   const decryptResult = decryptSecurePayload(payload, PRIVATE_DECRYPTION_KEY);
   if (!decryptResult.success) {
     return res.status(422).json({
@@ -422,36 +437,14 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
   const clientPhone = orderData.clientPhone || orderData.party1?.phone || orderData.party2?.phone || 'Not Provided';
   const duty = Number(orderData.stampDutyValue || orderData.stampDutyAmount || 500);
 
-  // 4. File & Media Handling: Upload photos/images/attachments to Cloudinary (or local media store)
+  // 4. File & Media Handling (Upload photos/images to Cloudinary if configured, or keep URL)
   const mediaResult = await processOrderMedia(orderData, orderId);
 
-  // 5. Generate Clean Legal Document PDF (Flexible e-Stamp overlay continuation provision, NO fake stamp drawing)
-  let pdfBuffer: Buffer;
-  try {
-    pdfBuffer = await generateLegalAgreementPdf({
-      ...orderData,
-      id: orderId,
-      formName,
-      clientName,
-      clientPhone,
-      stampDutyValue: duty,
-      overlayProvision: true
-    });
-  } catch (pdfErr: any) {
-    return res.status(500).json({
-      success: false,
-      error: 'Legal document PDF generation failed: ' + pdfErr.message
-    });
-  }
+  // 5. On-Demand PDF URL (Dynamic stream route, NEVER stored to disk or Cloudinary!)
+  const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : '';
+  const onDemandPdfUrl = `${hostUrl}/api/documents/render-pdf?orderId=${orderId}`;
 
-  // 6. Upload PDF to Cloudinary (or Local Secure Document Store)
-  const uploadResult = await uploadPdfToCloudinary(pdfBuffer, orderId, `Legal_Agreement_${orderId}.pdf`);
-
-  // Build absolute download URL
-  const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : 'https://your-domain.netlify.app';
-  const fullPdfDownloadUrl = uploadResult.url.startsWith('http') ? uploadResult.url : `${hostUrl}${uploadResult.url}`;
-
-  // 7. Form Complete Persistent Order Record (NO RAM WIPING)
+  // 6. Form Complete Raw Data Record (RAW DATA STORED PERMANENTLY, NO PDF STORED!)
   const completeOrderRecord = {
     id: orderId,
     referenceCode: orderData.referenceCode || `WA-RECV-${Date.now()}`,
@@ -462,7 +455,7 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
     clientPhone: clientPhone,
     clientEmail: orderData.clientEmail || '',
     stampDutyValue: duty,
-    status: 'confirmed_stamp_attached',
+    status: 'received',
     legalData: orderData.legalData || {
       documentTitle: formName,
       party1: orderData.party1 || { fullName: clientName },
@@ -473,22 +466,22 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
     },
     registrationData: orderData.registrationData || null,
     stampData: {
-      pdfUrl: fullPdfDownloadUrl,
-      verified: true,
-      provider: uploadResult.provider
+      pdfUrl: onDemandPdfUrl,
+      verified: false,
+      provider: 'On-Demand In-Memory Generator (No Storage)'
     },
     photoUrl: mediaResult.photoUrl,
     mediaUrls: mediaResult.mediaUrls,
-    rawPayload: orderData, // Complete decrypted data preserved permanently!
+    rawPayload: orderData, // Complete raw decrypted JSON stored permanently!
     createdAt: orderData.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     source: source || 'Website A (API Receive)'
   };
 
-  // Permanently save into in-memory store so it never disappears from Orders tab
+  // Permanently save into in-memory store so it immediately appears in all admin tabs
   activeOrdersStore.unshift(completeOrderRecord);
 
-  // 8. Permanent Storage in Supabase Database
+  // 7. Permanent Storage in Supabase Database (Raw Data ONLY, NO PDF File!)
   const resolvedSupabase = resolveSupabaseUrl();
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
   if (resolvedSupabase && supabaseKey) {
@@ -509,7 +502,7 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
           form_name: formName,
           category: completeOrderRecord.category,
           stamp_duty_value: duty,
-          status: 'confirmed_stamp_attached',
+          status: 'received',
           legal_data: completeOrderRecord.legalData,
           registration_data: completeOrderRecord.registrationData,
           stamp_data: completeOrderRecord.stampData,
@@ -526,7 +519,7 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
     } catch {}
   }
 
-  // 9. Dispatch Instant Telegram Alert to Admin
+  // 8. Dispatch Instant Telegram Alert to Admin: "नया ऑर्डर आ चुका है!"
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
   const telegramMessage = `🔔 *नया ऑर्डर आ चुका है!*
@@ -538,7 +531,7 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
 • *स्टाम्प ड्यूटी:* ₹${duty}/-
 • *स्रोत:* वेबसाइट A
 
-📄 *दस्तावेज़ लिंक:* [PDF देखें](${fullPdfDownloadUrl})`;
+_✓ केवल रॉ डेटा डेटाबेस में सुरक्षित सेव हुआ है (स्टोरेज कभी फुल नहीं होगी)_`;
 
   const notificationEntry = {
     id: `tg-${Date.now()}`,
@@ -562,7 +555,7 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
           chat_id: tgChatId,
           text: telegramMessage,
           parse_mode: 'Markdown',
-          disable_web_page_preview: false
+          disable_web_page_preview: true
         })
       }).catch((err) => {
         console.warn('Telegram send error:', err);
@@ -570,36 +563,73 @@ app.post('/api/orders/receive', async (req: Request, res: Response) => {
     } catch {}
   }
 
-  // 10. Record in Audit Trail
+  // 9. Record in Audit Trail
   const auditEntry = {
     id: `log-${Date.now()}`,
     timestamp: new Date().toISOString(),
     orderId,
     type: 'order_received_pipeline',
-    message: `Order ${orderId} received from Website A (${clientIp}), decrypted, media uploaded, permanently saved in Supabase & memory.`,
+    message: `Order ${orderId} received from Website A (${clientIp}), decrypted, raw data permanently saved in Supabase & memory.`,
     status: 'success'
   };
   systemAuditTrail.unshift(auditEntry);
 
-  // 11. Return Success Response with Full Order Object
+  // 10. Return Success Response with Raw Order Object (No PDF stored)
   return res.json({
     success: true,
-    status: 'PROCESSED',
+    status: 'PROCESSED_AND_STORED',
     orderId,
     clientName,
     formName,
     clientPhone,
     stampDutyAmount: duty,
-    pdfDownloadUrl: fullPdfDownloadUrl,
     photoUrl: mediaResult.photoUrl,
-    mediaUrls: mediaResult.mediaUrls,
-    storageProvider: uploadResult.provider,
+    rawPayloadSaved: true,
+    pdfStored: false,
+    onDemandPdfUrl,
     telegramNotification: botToken ? 'Delivered' : 'Simulated',
-    hmacVerified: Boolean(SUBMISSION_HMAC_SECRET),
+    hmacVerified: Boolean(websiteSecret),
     order: completeOrderRecord,
     processedAt: new Date().toISOString()
   });
+}
+
+// Mount order receiver on both endpoints
+app.post('/api/orders/receive', handleReceiveOrder);
+app.post('/api/receive-order', handleReceiveOrder);
+
+// On-Demand In-Memory Dynamic PDF Streaming Route (Never saves to disk or Cloudinary!)
+app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {
+  const orderId = req.query.orderId as string;
+  const isOverlay = req.query.overlay === 'true';
+
+  if (!orderId) {
+    return res.status(400).send('Missing orderId query parameter');
+  }
+
+  const order = activeOrdersStore.find((o) => o.id === orderId);
+  if (!order) {
+    return res.status(404).send('Order not found in database / memory');
+  }
+
+  try {
+    const pdfBuf = await generateLegalAgreementPdf({
+      ...order,
+      overlayProvision: isOverlay
+    }, {
+      overlayProvision: isOverlay,
+      topBlankSpace: 260
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Legal_Format_${orderId}.pdf"`);
+    res.setHeader('Content-Length', pdfBuf.length);
+    res.send(pdfBuf);
+  } catch (err: any) {
+    res.status(500).send('Failed to generate PDF dynamically: ' + err.message);
+  }
 });
+
 
 // Centralized Orders Retrieval Endpoint for Admin Panel (Fetches from Supabase + Active Store)
 app.get('/api/orders', async (_req: Request, res: Response) => {

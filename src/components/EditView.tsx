@@ -51,10 +51,8 @@ export const EditView: React.FC<EditViewProps> = ({
   onSelectOrder,
   onSaveOrder
 }) => {
-  // Stamped forms are automatically excluded from Edit list
-  const editableOrders = orders.filter(
-    (o) => !o.stampData?.verified && o.status !== 'confirmed_stamp_attached'
-  );
+  // Allow editing all orders anytime
+  const editableOrders = orders;
 
   // Top Dropdown Filter
   const [categoryFilter, setCategoryFilter] = useState<
@@ -659,6 +657,24 @@ export const EditView: React.FC<EditViewProps> = ({
                       <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span className="text-slate-500">Contact:</span>
                       <span className="font-mono font-medium text-slate-900">{contactPhone}</span>
+                    </div>
+
+                    <div className="pt-1 flex flex-wrap items-center gap-2">
+                      {order.stampData?.verified ? (
+                        <div className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>e-Stamp Attached</span>
+                        </div>
+                      ) : (
+                        <div className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-full">
+                          <span>e-Stamp Pending</span>
+                        </div>
+                      )}
+                      {order.photoUrl && (
+                        <div className="inline-flex items-center gap-1 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                          <span>Photo Attached</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
