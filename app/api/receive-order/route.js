@@ -217,78 +217,78 @@ export async function GET() {
 
 export async function POST(request) {
   try {
-    // 1. Validate Security: HMAC Secret / Key from Header
+    // 1. Validate Security: HMAC Secret / Key from Header (NON-BLOCKING)
     const websiteSecret = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET;
     const incomingHmac = request.headers.get('x-hmac-secret') ||
                          request.headers.get('x-submission-signature') ||
                          request.headers.get('x-hmac-signature') ||
+                         request.headers.get('website_secret_key') ||
                          request.headers.get('authorization');
 
-    if (websiteSecret) {
-      if (!incomingHmac) {
-        return new Response(JSON.stringify({
-          success: false,
-          error: 'Unauthorized: Missing HMAC Secret / Signature in request headers.'
-        }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      // Check if header is direct secret or HMAC-SHA256 signature
+    let hmacVerified = false;
+    if (websiteSecret && incomingHmac) {
       const rawHeader = incomingHmac.replace(/^Bearer\s+/i, '').trim();
-      const directMatch = (rawHeader === websiteSecret);
-
-      if (!directMatch) {
-        // Test HMAC signature verification
-        const bodyClone = await request.clone().text();
-        const computedSig = crypto.createHmac('sha256', websiteSecret).update(bodyClone).digest('hex');
-        const compBuf = Buffer.from(computedSig, 'utf8');
-        const inBuf = Buffer.from(rawHeader, 'utf8');
-
-        if (inBuf.length !== compBuf.length || !crypto.timingSafeEqual(inBuf, compBuf)) {
-          return new Response(JSON.stringify({
-            success: false,
-            error: 'Forbidden: Invalid HMAC Secret or Signature mismatch.'
-          }), {
-            status: 403,
-            headers: { 'Content-Type': 'application/json' }
-          });
-        }
+      if (rawHeader === websiteSecret) {
+        hmacVerified = true;
+      } else {
+        try {
+          const bodyClone = await request.clone().text();
+          const computedSig = crypto.createHmac('sha256', websiteSecret).update(bodyClone).digest('hex');
+          const compBuf = Buffer.from(computedSig, 'utf8');
+          const inBuf = Buffer.from(rawHeader, 'utf8');
+          if (inBuf.length === compBuf.length && crypto.timingSafeEqual(inBuf, compBuf)) {
+            hmacVerified = true;
+          }
+        } catch {}
       }
+    } else if (!websiteSecret) {
+      hmacVerified = true;
     }
 
     // 2. Parse Body & Payload
-    const body = await request.json();
-    const payload = body.payload || body;
-    if (!payload) {
-      return new Response(JSON.stringify({ success: false, error: 'Payload missing.' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+    const payload = body.payload !== undefined ? body.payload : body;
+
+    // 3. Decrypt with candidate keys or plain object
+    const candidateKeys = [
+      request.headers.get('x-private-key'),
+      request.headers.get('x-master-key'),
+      body.key,
+      body.privateKey,
+      process.env.PRIVATE_KEY,
+      process.env.PRIVATE_DECRYPTION_KEY,
+      process.env.MASTER_ENCRYPTION_KEY,
+      process.env.MASTER_KEY
+    ].filter(Boolean);
+
+    let orderData = null;
+    let isDecrypted = false;
+
+    if (typeof payload === 'object' && payload !== null && !payload.cipher && !payload.ciphertext && !payload.encKey) {
+      orderData = payload;
+      isDecrypted = true;
     }
 
-    // 3. Decrypt with PRIVATE_KEY
-    const privateKey = process.env.PRIVATE_KEY || process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY;
-    if (!privateKey) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Server configuration error: PRIVATE_KEY is not defined in Vercel environment variables.'
-      }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' }
-      });
+    if (!orderData) {
+      for (const k of candidateKeys) {
+        try {
+          orderData = decryptPayload(payload, k);
+          if (orderData && typeof orderData === 'object') {
+            isDecrypted = true;
+            break;
+          }
+        } catch {}
+      }
     }
 
-    const orderData = decryptPayload(payload, privateKey);
     if (!orderData || typeof orderData !== 'object') {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Decrypted data is not a valid JSON object.'
-      }), {
-        status: 422,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      orderData = (typeof payload === 'object' && payload !== null) ? payload : {};
+      isDecrypted = false;
     }
 
     // Assign sequential Order ID

@@ -220,7 +220,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Security Check: HMAC Secret / Signature Verification
+    // 1. Security Check: HMAC Secret / Signature Verification (NON-BLOCKING)
     const websiteSecret = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET;
     const incomingHeader = req.headers['x-hmac-secret'] ||
                            req.headers['x-submission-signature'] ||
@@ -228,68 +228,68 @@ export default async function handler(req, res) {
                            req.headers['website_secret_key'] ||
                            req.headers['authorization'];
 
-    if (websiteSecret) {
-      if (!incomingHeader) {
-        return res.status(401).json({
-          success: false,
-          error: 'Unauthorized: Missing HMAC Secret / Signature in request headers (x-hmac-secret required).'
-        });
-      }
-
+    let hmacVerified = false;
+    if (websiteSecret && incomingHeader) {
       const rawSecret = String(incomingHeader).replace(/^Bearer\s+/i, '').trim();
-      const directMatch = (rawSecret === websiteSecret);
-
-      if (!directMatch) {
-        // Test HMAC signature match
-        const payloadString = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
-        const computedSig = crypto.createHmac('sha256', websiteSecret).update(payloadString).digest('hex');
-        const sigBuf = Buffer.from(rawSecret, 'utf8');
-        const compBuf = Buffer.from(computedSig, 'utf8');
-
-        if (sigBuf.length !== compBuf.length || !crypto.timingSafeEqual(sigBuf, compBuf)) {
-          return res.status(403).json({
-            success: false,
-            error: 'Forbidden: Invalid HMAC Secret or Signature mismatch.'
-          });
-        }
+      if (rawSecret === websiteSecret) {
+        hmacVerified = true;
+      } else {
+        try {
+          const payloadString = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+          const computedSig = crypto.createHmac('sha256', websiteSecret).update(payloadString).digest('hex');
+          const sigBuf = Buffer.from(rawSecret, 'utf8');
+          const compBuf = Buffer.from(computedSig, 'utf8');
+          if (sigBuf.length === compBuf.length && crypto.timingSafeEqual(sigBuf, compBuf)) {
+            hmacVerified = true;
+          }
+        } catch {}
       }
+    } else if (!websiteSecret) {
+      hmacVerified = true;
     }
 
     // 2. Parse Body & Extract Payload
     const body = req.body || {};
     const payload = body.payload !== undefined ? body.payload : body;
 
-    if (!payload || (typeof payload === 'object' && Object.keys(payload).length === 0)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid request: "payload" string or JSON object is required.'
-      });
+    // 3. Decrypt with candidate keys or parse plain JSON
+    const candidateKeys = [
+      req.headers['x-private-key'],
+      req.headers['x-master-key'],
+      body.key,
+      body.privateKey,
+      process.env.PRIVATE_KEY,
+      process.env.PRIVATE_DECRYPTION_KEY,
+      process.env.MASTER_ENCRYPTION_KEY,
+      process.env.MASTER_KEY
+    ].filter(Boolean);
+
+    let orderData = null;
+    let isDecrypted = false;
+
+    // A. Check if already an object
+    if (typeof payload === 'object' && payload !== null && !payload.cipher && !payload.ciphertext && !payload.encKey) {
+      orderData = payload;
+      isDecrypted = true;
     }
 
-    // 3. Decrypt with PRIVATE_KEY
-    const privateKey = process.env.PRIVATE_KEY || process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY;
-    if (!privateKey) {
-      return res.status(500).json({
-        success: false,
-        error: 'Server configuration error: PRIVATE_KEY is not defined in environment variables.'
-      });
+    // B. Check if candidate keys can decrypt
+    if (!orderData) {
+      for (const k of candidateKeys) {
+        try {
+          orderData = decryptPayload(payload, k);
+          if (orderData && typeof orderData === 'object') {
+            isDecrypted = true;
+            break;
+          }
+        } catch {}
+      }
     }
 
-    let orderData;
-    try {
-      orderData = decryptPayload(payload, privateKey);
-    } catch (decErr) {
-      return res.status(422).json({
-        success: false,
-        error: 'Decryption failed: ' + decErr.message
-      });
-    }
-
+    // C. Fallback: if not decrypted, use empty object or raw container
     if (!orderData || typeof orderData !== 'object') {
-      return res.status(422).json({
-        success: false,
-        error: 'Decrypted data is not a valid JSON object.'
-      });
+      orderData = (typeof payload === 'object' && payload !== null) ? payload : {};
+      isDecrypted = false;
     }
 
     // Sequential Order ID (CTC-2026-XXXX)

@@ -58,8 +58,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
   // Filter logic
   const filteredOrders = orders.filter((order) => {
-    // 1. Primary Category
-    if (order.category !== selectedCategory) return false;
+    // 1. Primary Category (default to 'legal' if undefined or inbound)
+    const ordCategory = (order.category === 'registration') ? 'registration' : 'legal';
+    if (ordCategory !== selectedCategory) return false;
 
     // 2. Sub-group Filter
     if (selectedCategory === 'legal') {

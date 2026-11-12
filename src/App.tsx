@@ -10,7 +10,7 @@
 import React, { useState, useEffect } from 'react';
 import { Order, AuditLog, TelegramNotification } from './types';
 import { INITIAL_ORDERS, INITIAL_AUDIT_LOGS, INITIAL_NOTIFICATIONS } from './utils/mockData';
-import { DEFAULT_MASTER_KEY, autoDecryptFromUrl } from './utils/crypto';
+import { DEFAULT_MASTER_KEY, autoDecryptFromUrl, decryptPayload } from './utils/crypto';
 import { formatTelegramOrderMessage } from './utils/telegramFormatter';
 import { syncOrderToSupabase, fetchOrdersFromSupabase } from './utils/supabase';
 
@@ -125,19 +125,65 @@ export default function App() {
     }
   }, [auditLogs, notifications, masterKey, telegramToken, telegramChatId]);
 
-  // Sync with Backend Server & Supabase on startup and periodic interval
+  // Synchronize masterKey with backend server for automated server-side decryption
+  useEffect(() => {
+    if (masterKey) {
+      fetch('/api/config/key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: masterKey })
+      }).catch(() => {});
+    }
+  }, [masterKey]);
+
+  // Real-Time Server-Sent Events (SSE) Listener for instant inbound orders from Website A
+  useEffect(() => {
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource('/api/orders/stream');
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'NEW_ORDER' && data.order) {
+            const newOrder: Order = data.order;
+            setOrders(prev => {
+              const exists = prev.some(o => o.id === newOrder.id);
+              if (exists) {
+                return prev.map(o => o.id === newOrder.id ? newOrder : o);
+              }
+              return [newOrder, ...prev];
+            });
+            setSelectedOrder(newOrder);
+            setActiveTab('orders');
+            setAutoDecryptNotice(`⚡ नया ऑर्डर आ चुका है: ${newOrder.id} (${newOrder.clientName})`);
+            setTimeout(() => setAutoDecryptNotice(null), 8000);
+          }
+        } catch {}
+      };
+    } catch {}
+
+    return () => {
+      if (es) es.close();
+    };
+  }, []);
+
+  // Sync with Backend Server & Supabase on startup and periodic interval (every 2.5s)
   useEffect(() => {
     const syncRemote = async () => {
       try {
         const serverRes = await fetch('/api/orders');
         if (serverRes.ok) {
           const serverData = await serverRes.json();
-          if (serverData.success && Array.isArray(serverData.orders) && serverData.orders.length > 0) {
+          if (serverData.success && Array.isArray(serverData.orders)) {
             setOrders(prev => {
-              const map = new Map<string, Order>();
-              prev.forEach(o => map.set(o.id, o));
-              serverData.orders.forEach((o: Order) => map.set(o.id, o));
-              return Array.from(map.values());
+              const orderMap = new Map<string, Order>();
+              // First add server orders (which are sorted newest first)
+              serverData.orders.forEach((o: Order) => orderMap.set(o.id, o));
+              // Then add any local orders that might not be on the server
+              prev.forEach(o => {
+                if (!orderMap.has(o.id)) orderMap.set(o.id, o);
+              });
+              return Array.from(orderMap.values());
             });
             return;
           }
@@ -150,17 +196,48 @@ export default function App() {
       if (remoteOrders.length > 0) {
         setOrders(prev => {
           const map = new Map<string, Order>();
-          prev.forEach(o => map.set(o.id, o));
           remoteOrders.forEach(o => map.set(o.id, o));
+          prev.forEach(o => {
+            if (!map.has(o.id)) map.set(o.id, o);
+          });
           return Array.from(map.values());
         });
       }
     };
 
     syncRemote();
-    const interval = setInterval(syncRemote, 8000);
+    const interval = setInterval(syncRemote, 2500);
     return () => clearInterval(interval);
   }, []);
+
+  // Auto-decrypt any pending orders in state using client masterKey if not yet decrypted
+  useEffect(() => {
+    if (!masterKey) return;
+    orders.forEach(async (order) => {
+      if (order.status === 'pending_decryption' && order.encryptedPayload) {
+        const res = await decryptPayload(order.encryptedPayload, masterKey);
+        if (res.success && res.data) {
+          const decryptedData = res.data;
+          setOrders(prev => prev.map(o => {
+            if (o.id === order.id) {
+              return {
+                ...o,
+                status: 'decrypted',
+                clientName: decryptedData.clientName || decryptedData.party1?.fullName || o.clientName,
+                formName: decryptedData.formName || decryptedData.documentTitle || o.formName,
+                clientPhone: decryptedData.clientPhone || decryptedData.party1?.phone || o.clientPhone,
+                stampDutyValue: Number(decryptedData.stampDutyValue || decryptedData.stampDutyAmount || o.stampDutyValue),
+                legalData: decryptedData.legalData || (decryptedData.party1 ? decryptedData : o.legalData),
+                registrationData: decryptedData.registrationData || o.registrationData,
+                rawPayload: decryptedData
+              };
+            }
+            return o;
+          }));
+        }
+      }
+    });
+  }, [orders, masterKey]);
 
   // AUTO-DECRYPTION ON APP LOAD (?payload=... or ?data=...)
   useEffect(() => {

@@ -92,7 +92,14 @@ export async function decryptPayload<T = any>(
       return { success: false, error: 'Empty or invalid encrypted payload' };
     }
 
-    const trimmed = encryptedString.trim();
+    let trimmed = encryptedString.trim();
+
+    // URL decode if encoded
+    if (trimmed.includes('%7B') || trimmed.includes('%22') || trimmed.includes('%3A')) {
+      try {
+        trimmed = decodeURIComponent(trimmed);
+      } catch {}
+    }
 
     // Check for b64 simulation fallback
     if (trimmed.startsWith('b64:')) {
@@ -100,43 +107,77 @@ export async function decryptPayload<T = any>(
       return { success: true, data: JSON.parse(raw) };
     }
 
-    // Standard ivHex:cipherHex format
-    if (trimmed.includes(':')) {
-      const parts = trimmed.split(':');
-      if (parts.length >= 2) {
-        const iv = fromHex(parts[0]);
-        const ciphertext = fromHex(parts[1]);
-        const key = await deriveKey(masterKey);
-
-        const decryptedBuffer = await crypto.subtle.decrypt(
-          {
-            name: 'AES-GCM',
-            iv: iv as any
-          },
-          key,
-          ciphertext as any
-        );
-
-        const dec = new TextDecoder();
-        const jsonStr = dec.decode(decryptedBuffer);
-        return { success: true, data: JSON.parse(jsonStr) };
-      }
+    // Fallback: check if raw JSON string was passed
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (!parsed.encKey && !parsed.cipher && !parsed.ciphertext) {
+          return { success: true, data: parsed };
+        }
+      } catch {}
     }
 
     // Try base64 decoded string
     try {
       const decoded = atob(trimmed);
       if (decoded.startsWith('{') || decoded.startsWith('[')) {
-        return { success: true, data: JSON.parse(decoded) };
+        const parsed = JSON.parse(decoded);
+        if (!parsed.encKey && !parsed.cipher && !parsed.ciphertext) {
+          return { success: true, data: parsed };
+        }
       }
-    } catch {
-      // not base64 json
+    } catch {}
+
+    // Standard ivHex:cipherHex or ivHex:cipherHex:tagHex format
+    if (trimmed.includes(':') && masterKey) {
+      try {
+        const parts = trimmed.split(':');
+        if (parts.length >= 2) {
+          const iv = fromHex(parts[0]);
+          const ciphertext = fromHex(parts[1]);
+          const tag = parts[2] ? fromHex(parts[2]) : null;
+
+          let fullCipher = ciphertext;
+          if (tag && tag.length > 0) {
+            fullCipher = new Uint8Array(ciphertext.length + tag.length);
+            fullCipher.set(ciphertext, 0);
+            fullCipher.set(tag, ciphertext.length);
+          }
+
+          const key = await deriveKey(masterKey);
+
+          const decryptedBuffer = await crypto.subtle.decrypt(
+            {
+              name: 'AES-GCM',
+              iv: iv as any
+            },
+            key,
+            fullCipher as any
+          );
+
+          const dec = new TextDecoder();
+          const jsonStr = dec.decode(decryptedBuffer);
+          return { success: true, data: JSON.parse(jsonStr) };
+        }
+      } catch {
+        // Fall through to server-side decrypt
+      }
     }
 
-    // Fallback: check if raw JSON string was passed
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-      return { success: true, data: JSON.parse(trimmed) };
-    }
+    // Server-side decrypt fallback (handles RSA, AES-CBC, and full OpenSSL modes)
+    try {
+      const resp = await fetch('/api/decrypt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload: trimmed, key: masterKey })
+      });
+      if (resp.ok) {
+        const sData = await resp.json();
+        if (sData.success && sData.data) {
+          return { success: true, data: sData.data };
+        }
+      }
+    } catch {}
 
     return { success: false, error: 'Unsupported or corrupted ciphertext format' };
   } catch (err: any) {

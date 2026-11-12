@@ -19,6 +19,8 @@ export type OrderStatus =
   | 'encrypted'
   | 'decrypted'
   | 'pending'
+  | 'pending_decryption'
+  | 'received'
   | 'confirmed'
   | 'cancelled'
   | 'stamp_pending'
