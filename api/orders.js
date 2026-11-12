@@ -6,10 +6,11 @@
  */
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST,PUT');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  const reqOrigin = req.headers['origin'] || '*';
+  res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-hmac-secret, x-submission-signature, x-hmac-signature, website_secret_key');
+  res.setHeader('Access-Control-Max-Age', '86400');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();

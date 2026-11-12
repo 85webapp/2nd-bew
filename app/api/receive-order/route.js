@@ -394,7 +394,7 @@ export async function POST(request) {
       message: 'Raw order data securely decrypted and stored permanently.'
     }), {
       status: 200,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
 
   } catch (err) {
@@ -403,7 +403,7 @@ export async function POST(request) {
       error: 'Decryption or processing failed: ' + err.message
     }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
   }
 }

@@ -188,15 +188,16 @@ async function uploadMedia(mediaData, publicId) {
  */
 export default async function handler(req, res) {
   // Set CORS headers for all incoming requests (including Website A)
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  const reqOrigin = req.headers['origin'] || '*';
+  res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, x-hmac-secret, x-submission-signature, x-hmac-signature, website_secret_key'
+    'Content-Type, x-hmac-secret, x-submission-signature, x-hmac-signature, website_secret_key, authorization, X-Requested-With, Accept'
   );
+  res.setHeader('Access-Control-Max-Age', '86400');
 
-  // Pre-flight OPTIONS request
+  // Pre-flight OPTIONS request - Immediately resolve with 200 OK
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }

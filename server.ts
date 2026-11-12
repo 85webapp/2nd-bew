@@ -50,12 +50,14 @@ const SUBMISSION_HMAC_SECRET = process.env.WEBSITE_SECRET_KEY || process.env.SUB
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// Enable CORS for external Website A inbound requests and webhooks
+// Enable CORS for external Website A inbound requests and webhooks (with 200 OK preflight)
 app.use(cors({
-  origin: '*',
+  origin: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-submission-signature', 'x-hmac-signature', 'x-hmac-secret', 'website_secret_key']
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-submission-signature', 'x-hmac-signature', 'x-hmac-secret', 'website_secret_key'],
+  optionsSuccessStatus: 200
 }));
+app.options('*', cors({ origin: true, optionsSuccessStatus: 200 }));
 
 // Serve generated PDFs, legal documents, and uploaded media
 const localDocPath = path.resolve(__dirname, 'public/uploads/documents');
