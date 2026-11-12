@@ -42,16 +42,20 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // NO HARD-CODING: Keys and secrets strictly loaded from environment variables
-const PRIVATE_DECRYPTION_KEY = process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || '';
+const PRIVATE_DECRYPTION_KEY = process.env.PRIVATE_KEY || process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || '';
 const MASTER_ENCRYPTION_KEY = PRIVATE_DECRYPTION_KEY;
 const MASTER_KEY = PRIVATE_DECRYPTION_KEY;
-const SUBMISSION_HMAC_SECRET = process.env.SUBMISSION_HMAC_SECRET || '';
+const SUBMISSION_HMAC_SECRET = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET || '';
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 // Enable CORS for external Website A inbound requests and webhooks
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'x-submission-signature', 'x-hmac-signature', 'x-hmac-secret', 'website_secret_key']
+}));
 
 // Serve generated PDFs, legal documents, and uploaded media
 const localDocPath = path.resolve(__dirname, 'public/uploads/documents');
@@ -594,9 +598,18 @@ _✓ केवल रॉ डेटा डेटाबेस में सुर�
   });
 }
 
-// Mount order receiver on both endpoints
+// Mount order receiver on both endpoints (with and without trailing slash, GET & POST)
+app.get('/api/receive-order', (_req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    status: 'active',
+    endpoint: '/api/receive-order',
+    message: 'Website B Inbound Order Receiver is active and ready for POST requests.'
+  });
+});
 app.post('/api/orders/receive', handleReceiveOrder);
 app.post('/api/receive-order', handleReceiveOrder);
+app.post('/api/receive-order/', handleReceiveOrder);
 
 // On-Demand In-Memory Dynamic PDF Streaming Route (Never saves to disk or Cloudinary!)
 app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {

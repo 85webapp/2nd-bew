@@ -189,6 +189,32 @@ async function uploadMedia(mediaData, publicIdPrefix) {
   return mediaData; // return base64 inline if Cloudinary not configured
 }
 
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-hmac-secret, x-submission-signature, x-hmac-signature, website_secret_key'
+    }
+  });
+}
+
+export async function GET() {
+  return new Response(JSON.stringify({
+    success: true,
+    status: 'active',
+    endpoint: '/api/receive-order',
+    message: 'Website B Inbound Order Receiver is active and ready for POST requests.'
+  }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    }
+  });
+}
+
 export async function POST(request) {
   try {
     // 1. Validate Security: HMAC Secret / Key from Header
