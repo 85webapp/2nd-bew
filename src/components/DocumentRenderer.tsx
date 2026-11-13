@@ -243,7 +243,7 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
         {/* ===================== PREAMBLE & PARTIES ===================== */}
         <div className="space-y-4 text-justify">
           <p>
-            <strong>THIS {legalData.documentTitle.includes('AFFIDAVIT') ? 'AFFIDAVIT' : 'DEED / AGREEMENT'}</strong> is made and entered into at <strong>{legalData.executionPlace}</strong> on this <strong>{legalData.executionDate}</strong>, by and between:
+            <strong>THIS {(legalData.documentTitle || order.formName || '').toUpperCase().includes('AFFIDAVIT') ? 'AFFIDAVIT' : 'DEED / AGREEMENT'}</strong> is made and entered into at <strong>{legalData.executionPlace || legalData.state || 'New Delhi'}</strong> on this <strong>{legalData.executionDate || new Date().toISOString().split('T')[0]}</strong>, by and between:
           </p>
 
           {/* Party 1 */}

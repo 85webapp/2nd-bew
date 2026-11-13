@@ -73,39 +73,60 @@ export async function syncOrderToSupabase(order: Order, customConfig?: SupabaseC
     return false;
   }
 
-  try {
-    const cleanUrl = config.url.replace(/\/+$/, '');
-    const res = await fetch(`${cleanUrl}/rest/v1/orders`, {
-      method: 'POST',
-      headers: {
-        'apikey': config.anonKey,
-        'Authorization': `Bearer ${config.anonKey}`,
-        'Content-Type': 'application/json',
-        'Prefer': 'resolution=merge-duplicates'
-      },
-      body: JSON.stringify({
-        id: order.id,
-        reference_code: order.referenceCode,
-        client_name: order.clientName,
-        client_phone: order.clientPhone,
-        form_name: order.formName,
-        category: order.category,
-        stamp_duty_value: order.stampDutyValue,
-        status: order.status,
-        legal_data: order.legalData || null,
-        registration_data: order.registrationData || null,
-        stamp_data: order.stampData || null,
-        created_at: order.createdAt,
-        updated_at: order.updatedAt,
-        source: order.source
-      })
-    });
+  const cleanUrl = config.url.replace(/\/+$/, '');
+  let rowPayload: Record<string, any> = {
+    id: order.id,
+    reference_code: order.referenceCode,
+    client_name: order.clientName,
+    client_phone: order.clientPhone,
+    client_email: order.clientEmail || '',
+    form_type: order.formType || 'custom_document',
+    form_name: order.formName,
+    category: order.category,
+    stamp_duty_value: order.stampDutyValue,
+    status: order.status,
+    legal_data: order.legalData || null,
+    registration_data: order.registrationData || null,
+    stamp_data: order.stampData || null,
+    raw_payload: order.rawPayload || null,
+    photo_url: order.photoUrl || null,
+    media_urls: order.mediaUrls || [],
+    created_at: order.createdAt,
+    updated_at: order.updatedAt,
+    source: order.source
+  };
 
-    return res.ok;
-  } catch (err) {
-    console.warn('Supabase sync skipped / failed:', err);
-    return false;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      const res = await fetch(`${cleanUrl}/rest/v1/orders?on_conflict=id`, {
+        method: 'POST',
+        headers: {
+          'apikey': config.anonKey,
+          'Authorization': `Bearer ${config.anonKey}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates,return=representation'
+        },
+        body: JSON.stringify(rowPayload)
+      });
+
+      if (res.ok) return true;
+
+      const errText = await res.text();
+      const colMatch = errText.match(/Could not find the '([^']+)' column/i) ||
+                       errText.match(/column "([^"]+)" of relation "orders" does not exist/i);
+      if (colMatch && colMatch[1] && colMatch[1] in rowPayload) {
+        const nextPayload = { ...rowPayload };
+        delete nextPayload[colMatch[1]];
+        rowPayload = nextPayload;
+        continue;
+      }
+      return false;
+    } catch (err) {
+      console.warn('Supabase sync skipped / failed:', err);
+      return false;
+    }
   }
+  return false;
 }
 
 /**
@@ -132,18 +153,23 @@ export async function fetchOrdersFromSupabase(customConfig?: SupabaseConfig): Pr
       id: r.id,
       referenceCode: r.reference_code || r.id,
       category: r.category || 'legal',
-      formType: r.form_type || 'custom_document',
+      formType: r.form_type || r.raw_payload?.formType || 'custom_document',
       formName: r.form_name || 'Legal Document',
       clientName: r.client_name || 'Client',
       clientPhone: r.client_phone || '',
-      clientEmail: r.client_email || '',
-      stampDutyValue: r.stamp_duty_value || 0,
+      clientEmail: r.client_email || r.raw_payload?.clientEmail || '',
+      state: r.state || r.legal_data?.state || r.raw_payload?.state || 'Delhi',
+      stampDutyValue: r.stamp_duty_value ?? 0,
       createdAt: r.created_at || new Date().toISOString(),
       updatedAt: r.updated_at || new Date().toISOString(),
       status: r.status || 'pending',
       legalData: r.legal_data,
       registrationData: r.registration_data,
       stampData: r.stamp_data,
+      photoUrl: r.photo_url || null,
+      mediaUrls: r.media_urls || [],
+      uploadedFiles: r.raw_payload?.uploadedFiles || [],
+      rawPayload: r.raw_payload || null,
       source: r.source || 'Website A',
       signatureVerified: true
     }));

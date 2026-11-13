@@ -206,9 +206,17 @@ export interface Order {
     certificateHash?: string;
   };
 
-  // Uploaded media & photos from Website A
+  // Uploaded media, PDFs, & files from Website A
   photoUrl?: string;
   mediaUrls?: string[];
+  uploadedFiles?: Array<{
+    name: string;
+    url: string;
+    mimeType?: string;
+    kind: 'pdf' | 'image' | 'file';
+    provider?: string;
+  }>;
+  state?: string;
   rawPayload?: any;
 
   // Webhook / Ingestion metadata

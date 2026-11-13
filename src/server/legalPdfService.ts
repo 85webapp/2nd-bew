@@ -326,22 +326,110 @@ export async function uploadPdfToCloudinary(
   }
 }
 
+export interface UploadedFileRecord {
+  name: string;
+  url: string;
+  mimeType: string;
+  kind: 'pdf' | 'image' | 'file';
+  provider: string;
+}
+
+function inferMimeAndExtension(dataStr: string, hintName?: string, hintMime?: string): { mimeType: string; ext: string; kind: 'pdf' | 'image' | 'file'; rawBase64: string } {
+  const dataUriMatch = dataStr.match(/^data:([^;]+);base64,(.+)$/s);
+  let mimeType = hintMime || '';
+  let rawBase64 = dataStr;
+
+  if (dataUriMatch) {
+    mimeType = dataUriMatch[1].toLowerCase().trim();
+    rawBase64 = dataUriMatch[2].replace(/\s+/g, '');
+  } else {
+    rawBase64 = dataStr.replace(/\s+/g, '');
+    // Detect magic bytes if raw base64
+    if (!mimeType) {
+      if (rawBase64.startsWith('JVBERi0')) mimeType = 'application/pdf';
+      else if (rawBase64.startsWith('/9j/')) mimeType = 'image/jpeg';
+      else if (rawBase64.startsWith('iVBORw0KGgo')) mimeType = 'image/png';
+      else if (rawBase64.startsWith('UklGR')) mimeType = 'image/webp';
+      else if (rawBase64.startsWith('R0lGOD')) mimeType = 'image/gif';
+    }
+  }
+
+  const lowerName = (hintName || '').toLowerCase();
+  if (!mimeType && lowerName.endsWith('.pdf')) mimeType = 'application/pdf';
+  if (!mimeType && (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg'))) mimeType = 'image/jpeg';
+  if (!mimeType && lowerName.endsWith('.png')) mimeType = 'image/png';
+  if (!mimeType && lowerName.endsWith('.webp')) mimeType = 'image/webp';
+
+  let ext = 'bin';
+  let kind: 'pdf' | 'image' | 'file' = 'file';
+
+  if (mimeType === 'application/pdf' || lowerName.endsWith('.pdf')) {
+    mimeType = 'application/pdf';
+    ext = 'pdf';
+    kind = 'pdf';
+  } else if (mimeType.startsWith('image/')) {
+    kind = 'image';
+    const sub = mimeType.split('/')[1]?.split('+')[0] || 'png';
+    ext = sub === 'jpeg' ? 'jpg' : sub;
+  } else if (mimeType === 'application/msword' || lowerName.endsWith('.doc')) {
+    ext = 'doc';
+  } else if (mimeType.includes('wordprocessingml') || lowerName.endsWith('.docx')) {
+    ext = 'docx';
+  } else if (lowerName.includes('.')) {
+    ext = lowerName.split('.').pop() || 'bin';
+  } else {
+    mimeType = mimeType || 'application/octet-stream';
+  }
+
+  return { mimeType, ext, kind, rawBase64 };
+}
+
+function classifyUrlKind(url: string, hintName?: string, hintMime?: string): { mimeType: string; kind: 'pdf' | 'image' | 'file' } {
+  const target = `${url} ${hintName || ''} ${hintMime || ''}`.toLowerCase();
+  if (target.includes('application/pdf') || target.includes('.pdf')) {
+    return { mimeType: 'application/pdf', kind: 'pdf' };
+  }
+  if (
+    target.includes('image/') ||
+    target.includes('.png') ||
+    target.includes('.jpg') ||
+    target.includes('.jpeg') ||
+    target.includes('.webp') ||
+    target.includes('.gif')
+  ) {
+    return { mimeType: hintMime || 'image/jpeg', kind: 'image' };
+  }
+  return { mimeType: hintMime || 'application/octet-stream', kind: 'file' };
+}
+
 /**
- * Uploads an image/media file (base64 string or binary) to Cloudinary
- * or stores locally in /public/uploads/media/.
+ * Uploads an image/PDF/document file (base64 data URI, raw base64, or URL) to Cloudinary
+ * or stores locally in /public/uploads/documents/ or /public/uploads/media/.
  */
 export async function uploadMediaToCloudinary(
   mediaData: string,
-  publicIdPrefix: string
-): Promise<{ success: boolean; url: string; provider: string }> {
+  publicIdPrefix: string,
+  options?: { fileName?: string; mimeType?: string }
+): Promise<{ success: boolean; url: string; provider: string; mimeType?: string; kind?: 'pdf' | 'image' | 'file' }> {
   if (!mediaData || typeof mediaData !== 'string') {
     return { success: false, url: '', provider: 'none' };
   }
 
-  // If already an HTTP URL, return as-is
-  if (mediaData.startsWith('http://') || mediaData.startsWith('https://')) {
-    return { success: true, url: mediaData, provider: 'External Remote URL' };
+  const trimmed = mediaData.trim();
+
+  // If already an HTTP URL or local /uploads/ path, return as-is
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('/uploads/')) {
+    const classified = classifyUrlKind(trimmed, options?.fileName, options?.mimeType);
+    return {
+      success: true,
+      url: trimmed,
+      provider: trimmed.startsWith('/uploads/') ? 'Local Store' : 'External Remote URL',
+      mimeType: classified.mimeType,
+      kind: classified.kind
+    };
   }
+
+  const { mimeType, ext, kind, rawBase64 } = inferMimeAndExtension(trimmed, options?.fileName, options?.mimeType);
 
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
   const apiKey = process.env.CLOUDINARY_API_KEY;
@@ -354,14 +442,19 @@ export async function uploadMediaToCloudinary(
       const paramsToSign = `public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
       const signature = crypto.createHash('sha1').update(paramsToSign).digest('hex');
 
+      const uploadDataUri = trimmed.startsWith('data:')
+        ? trimmed
+        : `data:${mimeType};base64,${rawBase64}`;
+
       const formData = new FormData();
-      formData.append('file', mediaData);
+      formData.append('file', uploadDataUri);
       formData.append('api_key', apiKey);
       formData.append('timestamp', String(timestamp));
       formData.append('public_id', publicId);
       formData.append('signature', signature);
 
-      const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+      const resourceType = kind === 'image' ? 'image' : 'raw';
+      const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`, {
         method: 'POST',
         body: formData
       });
@@ -371,118 +464,219 @@ export async function uploadMediaToCloudinary(
         return {
           success: true,
           url: json.secure_url || json.url,
-          provider: 'Cloudinary Cloud Storage'
+          provider: 'Cloudinary Cloud Storage',
+          mimeType,
+          kind
         };
       }
     } catch (err: any) {
-      console.warn('Cloudinary media upload failed, using local media store:', err.message);
+      console.warn('Cloudinary media upload failed, using local store:', err.message);
     }
   }
 
-  // Local storage fallback for media
+  // Local storage fallback (documents for PDFs/files, media for images)
   try {
-    let cleanBase64 = mediaData;
-    let ext = 'png';
-
-    const match = mediaData.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-    if (match) {
-      ext = match[1] === 'jpeg' ? 'jpg' : match[1];
-      cleanBase64 = match[2];
-    }
-
-    const safeName = `${publicIdPrefix}_${Date.now()}.${ext}`;
-    const localFilePath = path.join(LOCAL_MEDIA_DIR, safeName);
-    fs.writeFileSync(localFilePath, Buffer.from(cleanBase64, 'base64'));
+    const safePrefix = publicIdPrefix.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeName = `${safePrefix}_${Date.now()}.${ext}`;
+    const targetDir = kind === 'image' ? LOCAL_MEDIA_DIR : LOCAL_DOCS_DIR;
+    const urlBase = kind === 'image' ? '/uploads/media' : '/uploads/documents';
+    const localFilePath = path.join(targetDir, safeName);
+    fs.writeFileSync(localFilePath, Buffer.from(rawBase64, 'base64'));
 
     return {
       success: true,
-      url: `/uploads/media/${safeName}`,
-      provider: 'Local Media Store'
+      url: `${urlBase}/${safeName}`,
+      provider: kind === 'image' ? 'Local Media Store' : 'Secure Document Store',
+      mimeType,
+      kind
     };
-  } catch (err: any) {
+  } catch {
     return {
       success: true,
-      url: mediaData, // Return data URL if saving fails
-      provider: 'Inline Media'
+      url: trimmed.startsWith('data:') ? trimmed : `data:${mimeType};base64,${rawBase64}`,
+      provider: 'Inline Media',
+      mimeType,
+      kind
     };
   }
 }
 
 /**
- * Recursively scans order payload for any photo/image/media fields,
- * uploads them to Cloudinary (or local store), and populates URLs.
+ * Recursively scans order payload for any photo/image/PDF/file/attachment fields,
+ * uploads them to Cloudinary (or local store), and populates URLs & uploadedFiles.
  */
-export async function processOrderMedia(orderData: any, orderId: string): Promise<{ photoUrl: string | null; mediaUrls: string[] }> {
+export async function processOrderMedia(
+  orderData: any,
+  orderId: string
+): Promise<{ photoUrl: string | null; mediaUrls: string[]; uploadedFiles: UploadedFileRecord[] }> {
   const mediaUrls: string[] = [];
+  const uploadedFiles: UploadedFileRecord[] = [];
   let primaryPhotoUrl: string | null = null;
+  let counter = 0;
 
-  // Check top-level photo/applicantPhoto
-  const potentialPhotos = [
-    orderData.photo,
-    orderData.applicantPhoto,
-    orderData.photoUrl,
-    orderData.signatureImage,
-    orderData.party1?.photo,
-    orderData.legalData?.party1?.photo,
-    orderData.party2?.photo,
-    orderData.legalData?.party2?.photo
-  ].filter(Boolean);
+  const registerFile = (name: string, url: string, mimeType: string, kind: 'pdf' | 'image' | 'file', provider: string) => {
+    if (!url) return;
+    if (!mediaUrls.includes(url)) {
+      mediaUrls.push(url);
+    }
+    if (!uploadedFiles.some((f) => f.url === url)) {
+      uploadedFiles.push({ name, url, mimeType, kind, provider });
+    }
+    if (kind === 'image' && !primaryPhotoUrl) {
+      primaryPhotoUrl = url;
+    }
+  };
 
-  for (let i = 0; i < potentialPhotos.length; i++) {
-    const photo = potentialPhotos[i];
-    if (photo && typeof photo === 'string') {
-      const uploadRes = await uploadMediaToCloudinary(photo, `ctc_media_${orderId}_${i}`);
-      if (uploadRes.success && uploadRes.url) {
-        mediaUrls.push(uploadRes.url);
-        if (!primaryPhotoUrl) {
-          primaryPhotoUrl = uploadRes.url;
+  const isUploadableString = (val: unknown): val is string => {
+    if (typeof val !== 'string') return false;
+    const s = val.trim();
+    if (!s) return false;
+    if (s.startsWith('data:') && s.includes(';base64,')) return true;
+    if (s.startsWith('http://') || s.startsWith('https://')) {
+      return /\.(pdf|png|jpe?g|webp|gif|docx?|xlsx?)(\?|$)/i.test(s) || s.includes('cloudinary.com') || s.includes('supabase');
+    }
+    if (s.startsWith('/uploads/')) return true;
+    // Raw base64 PDF or image magic header with substantial length
+    if (s.length > 100 && /^(JVBERi0|\/9j\/|iVBORw0KGgo|UklGR|R0lGOD)/.test(s)) return true;
+    return false;
+  };
+
+  const uploadSingleEntry = async (
+    val: string,
+    labelName: string,
+    hintMime?: string
+  ): Promise<string> => {
+    const idx = counter++;
+    const res = await uploadMediaToCloudinary(val, `ctc_media_${orderId}_${idx}`, {
+      fileName: labelName,
+      mimeType: hintMime
+    });
+    if (res.success && res.url) {
+      registerFile(
+        labelName,
+        res.url,
+        res.mimeType || hintMime || 'application/octet-stream',
+        res.kind || 'file',
+        res.provider
+      );
+      return res.url;
+    }
+    return val;
+  };
+
+  // 1. Named top-level and party photo/file fields
+  const namedFields: Array<[any, string, (url: string) => void]> = [
+    [orderData.photo, 'Applicant Photo', (u) => { orderData.photo = u; }],
+    [orderData.applicantPhoto, 'Applicant Photo', (u) => { orderData.applicantPhoto = u; }],
+    [orderData.photoUrl, 'Primary Photo', (u) => { orderData.photoUrl = u; }],
+    [orderData.signatureImage, 'Signature', (u) => { orderData.signatureImage = u; }],
+    [orderData.signature, 'Signature', (u) => { orderData.signature = u; }],
+    [orderData.pdf, 'Attached PDF', (u) => { orderData.pdf = u; }],
+    [orderData.pdfData, 'Attached PDF', (u) => { orderData.pdfData = u; }],
+    [orderData.pdfUrl, 'Attached PDF', (u) => { orderData.pdfUrl = u; }],
+    [orderData.file, 'Attached File', (u) => { orderData.file = u; }],
+    [orderData.fileData, 'Attached File', (u) => { orderData.fileData = u; }],
+    [orderData.documentUrl, 'Attached Document', (u) => { orderData.documentUrl = u; }],
+    [orderData.idProof, 'ID Proof', (u) => { orderData.idProof = u; }],
+    [orderData.aadhaarFile, 'Aadhaar Document', (u) => { orderData.aadhaarFile = u; }],
+    [orderData.panFile, 'PAN Document', (u) => { orderData.panFile = u; }],
+    [orderData.party1?.photo, 'Party 1 Photo', (u) => { if (orderData.party1) orderData.party1.photo = u; }],
+    [orderData.party1?.signature, 'Party 1 Signature', (u) => { if (orderData.party1) orderData.party1.signature = u; }],
+    [orderData.party1?.idProof, 'Party 1 ID Proof', (u) => { if (orderData.party1) orderData.party1.idProof = u; }],
+    [orderData.legalData?.party1?.photo, 'Party 1 Photo', (u) => { if (orderData.legalData?.party1) orderData.legalData.party1.photo = u; }],
+    [orderData.party2?.photo, 'Party 2 Photo', (u) => { if (orderData.party2) orderData.party2.photo = u; }],
+    [orderData.party2?.signature, 'Party 2 Signature', (u) => { if (orderData.party2) orderData.party2.signature = u; }],
+    [orderData.party2?.idProof, 'Party 2 ID Proof', (u) => { if (orderData.party2) orderData.party2.idProof = u; }],
+    [orderData.legalData?.party2?.photo, 'Party 2 Photo', (u) => { if (orderData.legalData?.party2) orderData.legalData.party2.photo = u; }]
+  ];
+
+  for (const [val, label, setter] of namedFields) {
+    if (isUploadableString(val)) {
+      const uploadedUrl = await uploadSingleEntry(val, label);
+      setter(uploadedUrl);
+    }
+  }
+
+  // 2. Arrays of file/attachment/photo objects or strings
+  const arrayKeys = ['photos', 'attachments', 'files', 'documents', 'uploadedFiles', 'media', 'kycDocuments'];
+  for (const key of arrayKeys) {
+    const arr = orderData[key];
+    if (!Array.isArray(arr)) continue;
+
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i];
+      if (typeof item === 'string' && isUploadableString(item)) {
+        arr[i] = await uploadSingleEntry(item, `${key}_${i + 1}`);
+      } else if (item && typeof item === 'object') {
+        const rawContent = item.data || item.base64 || item.content || item.fileData || item.url || item.fileUrl;
+        const name = item.name || item.fileName || item.label || item.title || `${key}_${i + 1}`;
+        const mime = item.mimeType || item.type || item.contentType;
+        if (typeof rawContent === 'string' && (rawContent.startsWith('http') || isUploadableString(rawContent))) {
+          const uploadedUrl = await uploadSingleEntry(rawContent, name, mime);
+          item.url = uploadedUrl;
+          delete item.data;
+          delete item.base64;
+          delete item.content;
+          delete item.fileData;
         }
       }
     }
   }
 
-  // Check photos array if provided
-  if (Array.isArray(orderData.photos)) {
-    for (let i = 0; i < orderData.photos.length; i++) {
-      const p = orderData.photos[i];
-      if (p && typeof p === 'string') {
-        const uploadRes = await uploadMediaToCloudinary(p, `ctc_photo_${orderId}_${i}`);
-        if (uploadRes.success && uploadRes.url) {
-          mediaUrls.push(uploadRes.url);
-          if (!primaryPhotoUrl) {
-            primaryPhotoUrl = uploadRes.url;
-          }
-        }
+  // 3. Registration documentChecklist items
+  const checklist = orderData.registrationData?.documentChecklist || orderData.documentChecklist;
+  if (Array.isArray(checklist)) {
+    for (let i = 0; i < checklist.length; i++) {
+      const docItem = checklist[i];
+      if (!docItem || typeof docItem !== 'object') continue;
+      const rawContent = docItem.data || docItem.base64 || docItem.fileData || docItem.fileUrl || docItem.url;
+      if (typeof rawContent === 'string' && (rawContent.startsWith('http') || isUploadableString(rawContent))) {
+        const uploadedUrl = await uploadSingleEntry(rawContent, docItem.label || docItem.name || `Checklist_${i + 1}`, docItem.mimeType);
+        docItem.fileUrl = uploadedUrl;
+        docItem.uploaded = true;
+        delete docItem.data;
+        delete docItem.base64;
+        delete docItem.fileData;
       }
     }
   }
 
-  // Check attachments array if provided
-  if (Array.isArray(orderData.attachments)) {
-    for (let i = 0; i < orderData.attachments.length; i++) {
-      const att = orderData.attachments[i];
-      if (att && att.data && typeof att.data === 'string') {
-        const uploadRes = await uploadMediaToCloudinary(att.data, `ctc_att_${orderId}_${i}`);
-        if (uploadRes.success && uploadRes.url) {
-          att.url = uploadRes.url;
-          delete att.data; // clean base64
-          mediaUrls.push(uploadRes.url);
+  // 4. Deep recursive sweep for any remaining base64 data URIs anywhere inside orderData (so no base64 bloats DB)
+  const visited = new Set<any>();
+  const sweepNested = async (node: any, keyPath: string, depth: number) => {
+    if (!node || typeof node !== 'object' || depth > 5 || visited.has(node)) return;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        const v = node[i];
+        if (typeof v === 'string' && v.startsWith('data:') && v.includes(';base64,')) {
+          node[i] = await uploadSingleEntry(v, `${keyPath}_${i + 1}`);
+        } else if (v && typeof v === 'object') {
+          await sweepNested(v, `${keyPath}_${i}`, depth + 1);
         }
       }
+      return;
     }
-  }
 
-  // Update orderData with uploaded URLs
+    for (const k of Object.keys(node)) {
+      const v = node[k];
+      if (typeof v === 'string' && v.startsWith('data:') && v.includes(';base64,')) {
+        node[k] = await uploadSingleEntry(v, k);
+      } else if (v && typeof v === 'object') {
+        await sweepNested(v, k, depth + 1);
+      }
+    }
+  };
+
+  await sweepNested(orderData, 'attachment', 0);
+
   if (primaryPhotoUrl) {
     orderData.photoUrl = primaryPhotoUrl;
-    if (orderData.photo && orderData.photo.startsWith('data:')) {
-      orderData.photo = primaryPhotoUrl;
-    }
-    if (orderData.party1 && orderData.party1.photo && orderData.party1.photo.startsWith('data:')) {
-      orderData.party1.photo = primaryPhotoUrl;
-    }
   }
   orderData.mediaUrls = mediaUrls;
+  orderData.uploadedFiles = uploadedFiles;
 
-  return { photoUrl: primaryPhotoUrl, mediaUrls };
+  return { photoUrl: primaryPhotoUrl, mediaUrls, uploadedFiles };
 }
+

@@ -41,44 +41,22 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Dynamic In-Memory Master / Private Key (synced from env and client UI)
-let dynamicMasterKey = process.env.PRIVATE_KEY || process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || '';
-const PRIVATE_DECRYPTION_KEY = dynamicMasterKey;
-const MASTER_ENCRYPTION_KEY = dynamicMasterKey;
-const MASTER_KEY = dynamicMasterKey;
-const SUBMISSION_HMAC_SECRET = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET || '';
+// NO HARD-CODING: Keys and secrets strictly loaded from environment variables
+const PRIVATE_DECRYPTION_KEY = process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || process.env.ENCRYPTION_KEY || '';
+const MASTER_ENCRYPTION_KEY = PRIVATE_DECRYPTION_KEY;
+const MASTER_KEY = PRIVATE_DECRYPTION_KEY;
+const SUBMISSION_HMAC_SECRET = process.env.SUBMISSION_HMAC_SECRET || process.env.HMAC_SECRET || process.env.WEBHOOK_SECRET || '';
 
-// ULTRA-PERMISSIVE UNIVERSAL CORS (Website A, external origins, webhooks, cURL)
-app.use((req, res, next) => {
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, PUT, PATCH, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
-  res.setHeader('Access-Control-Expose-Headers', '*');
-  res.setHeader('Access-Control-Max-Age', '86400');
-
-  // Immediately resolve preflight OPTIONS with 200 OK
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+app.use(express.json({
+  limit: '50mb',
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf.toString('utf8');
   }
-  next();
-});
-
-// Large payload body parsers (JSON, urlencoded, raw text)
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.text({ limit: '50mb', type: ['text/*', 'application/octet-stream', 'application/x-www-form-urlencoded'] }));
-
-// Backup CORS helper
-app.use(cors({
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
-  allowedHeaders: '*',
-  optionsSuccessStatus: 200
 }));
-app.options('*', (_req, res) => res.status(200).end());
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Enable CORS for external Website A inbound requests and webhooks
+app.use(cors());
 
 // Serve generated PDFs, legal documents, and uploaded media
 const localDocPath = path.resolve(__dirname, 'public/uploads/documents');
@@ -95,9 +73,41 @@ const localMediaPath = path.resolve(__dirname, 'public/uploads/media');
 app.use('/uploads/documents', express.static(localDocPath));
 app.use('/uploads/media', express.static(localMediaPath));
 
-// Helper to derive 32-byte key from string
+// Helper to derive candidate 32-byte keys from string (SHA-256 passphrase hash + raw hex/utf8/base64 32-byte key)
+function deriveCandidate32ByteKeys(passphrase: string): Buffer[] {
+  const keys: Buffer[] = [];
+  const trimmed = passphrase.trim();
+  // 1. Standard SHA-256 derivation (matches Web Crypto & Node passphrase hashing)
+  keys.push(crypto.createHash('sha256').update(trimmed, 'utf8').digest());
+  // 2. Raw 64-char hex key
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+    keys.push(Buffer.from(trimmed, 'hex'));
+  }
+  // 3. Raw 32-byte UTF-8 key
+  const utf8Buf = Buffer.from(trimmed, 'utf8');
+  if (utf8Buf.length === 32) {
+    keys.push(utf8Buf);
+  }
+  // 4. Raw 32-byte Base64 key
+  try {
+    const b64Buf = Buffer.from(trimmed, 'base64');
+    if (b64Buf.length === 32) {
+      keys.push(b64Buf);
+    }
+  } catch {}
+  return keys;
+}
+
 function derive32ByteKey(passphrase: string): Buffer {
   return crypto.createHash('sha256').update(passphrase).digest();
+}
+
+function decodeBufferAuto(str: string): Buffer {
+  const clean = str.trim();
+  if (/^[0-9a-fA-F]+$/.test(clean) && clean.length % 2 === 0) {
+    return Buffer.from(clean, 'hex');
+  }
+  return Buffer.from(clean, 'base64');
 }
 
 /**
@@ -136,20 +146,32 @@ function decryptHybridEnvelope(envelope: any, privateKeyPem: string): { success:
       );
     }
 
-    const iv = Buffer.from(envelope.iv, (envelope.iv?.length === 24 || envelope.iv?.length === 32) ? 'hex' : 'base64');
-    const cipherText = envelope.cipher || envelope.ciphertext || envelope.data;
-    const tag = envelope.tag ? Buffer.from(envelope.tag, envelope.tag?.length === 32 ? 'hex' : 'base64') : null;
+    const iv = decodeBufferAuto(String(envelope.iv));
+    const cipherText = String(envelope.cipher || envelope.ciphertext || envelope.encryptedData || envelope.data);
+    const cipherBuf = decodeBufferAuto(cipherText);
+    const tagRaw = envelope.tag || envelope.authTag;
+    const tag = tagRaw ? decodeBufferAuto(String(tagRaw)) : null;
 
     if (tag) {
       const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
       decipher.setAuthTag(tag);
-      let decrypted = decipher.update(cipherText, (cipherText.length % 2 === 0 && !cipherText.includes('+') && !cipherText.includes('/')) ? 'hex' : 'base64', 'utf8');
-      decrypted += decipher.final('utf8');
+      const decrypted = Buffer.concat([decipher.update(cipherBuf), decipher.final()]).toString('utf8');
       return { success: true, data: JSON.parse(decrypted) };
     } else {
+      // Try Web Crypto GCM (trailing 16-byte auth tag) first, then CBC
+      if (cipherBuf.length > 16) {
+        try {
+          const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
+          decipher.setAuthTag(cipherBuf.subarray(cipherBuf.length - 16));
+          const decrypted = Buffer.concat([
+            decipher.update(cipherBuf.subarray(0, cipherBuf.length - 16)),
+            decipher.final()
+          ]).toString('utf8');
+          return { success: true, data: JSON.parse(decrypted) };
+        } catch {}
+      }
       const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv.subarray(0, 16));
-      let decrypted = decipher.update(cipherText, (cipherText.length % 2 === 0 && !cipherText.includes('+') && !cipherText.includes('/')) ? 'hex' : 'base64', 'utf8');
-      decrypted += decipher.final('utf8');
+      const decrypted = Buffer.concat([decipher.update(cipherBuf), decipher.final()]).toString('utf8');
       return { success: true, data: JSON.parse(decrypted) };
     }
   } catch (err: any) {
@@ -157,206 +179,197 @@ function decryptHybridEnvelope(envelope: any, privateKeyPem: string): { success:
   }
 }
 
+function tryAesPartsDecrypt(ivBuf: Buffer, cipherBuf: Buffer, tagBuf: Buffer | null, keys: Buffer[]): any | null {
+  for (const key of keys) {
+    if (tagBuf) {
+      try {
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, ivBuf);
+        decipher.setAuthTag(tagBuf);
+        const out = Buffer.concat([decipher.update(cipherBuf), decipher.final()]).toString('utf8');
+        return JSON.parse(out);
+      } catch {}
+    } else {
+      // 1. Web Crypto AES-256-GCM appends 16-byte authTag to the end of ciphertext
+      if (cipherBuf.length > 16) {
+        try {
+          const ct = cipherBuf.subarray(0, cipherBuf.length - 16);
+          const tag = cipherBuf.subarray(cipherBuf.length - 16);
+          const decipher = crypto.createDecipheriv('aes-256-gcm', key, ivBuf);
+          decipher.setAuthTag(tag);
+          const out = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+          return JSON.parse(out);
+        } catch {}
+      }
+      // 2. Try AES-256-CBC (16-byte IV)
+      if (ivBuf.length >= 16) {
+        try {
+          const decipherCbc = crypto.createDecipheriv('aes-256-cbc', key, ivBuf.subarray(0, 16));
+          const out = Buffer.concat([decipherCbc.update(cipherBuf), decipherCbc.final()]).toString('utf8');
+          return JSON.parse(out);
+        } catch {}
+      }
+    }
+  }
+  return null;
+}
+
 /**
- * Decrypt AES-256-GCM or AES-256-CBC ciphertext
+ * Decrypt AES-256-GCM or AES-256-CBC ciphertext (supports iv:cipher:tag, WebCrypto iv:cipherWithTag, JSON {iv, encryptedData, authTag}, b64, etc.)
  */
-function decryptAES256(encryptedString: string, keyString: string = MASTER_KEY): { success: boolean; data?: any; error?: string } {
+function decryptAES256(encryptedInput: any, keyString: string = MASTER_KEY): { success: boolean; data?: any; error?: string } {
   try {
-    const trimmed = encryptedString.trim();
+    const candidateKeys = deriveCandidate32ByteKeys(keyString);
+
+    // 0. Structured object { iv, ciphertext|encryptedData|cipher|data, authTag|tag }
+    if (typeof encryptedInput === 'object' && encryptedInput !== null) {
+      if (encryptedInput.iv && (encryptedInput.ciphertext || encryptedInput.encryptedData || encryptedInput.cipher || encryptedInput.data)) {
+        const ivBuf = decodeBufferAuto(String(encryptedInput.iv));
+        const cipherBuf = decodeBufferAuto(String(encryptedInput.ciphertext || encryptedInput.encryptedData || encryptedInput.cipher || encryptedInput.data));
+        const tagRaw = encryptedInput.authTag || encryptedInput.tag;
+        const tagBuf = tagRaw ? decodeBufferAuto(String(tagRaw)) : null;
+        const parsed = tryAesPartsDecrypt(ivBuf, cipherBuf, tagBuf, candidateKeys);
+        if (parsed !== null) return { success: true, data: parsed };
+      }
+    }
+
+    const trimmed = (typeof encryptedInput === 'string' ? encryptedInput : JSON.stringify(encryptedInput)).trim();
 
     if (trimmed.startsWith('b64:')) {
       const raw = Buffer.from(trimmed.substring(4), 'base64').toString('utf8');
       return { success: true, data: JSON.parse(decodeURIComponent(raw)) };
     }
 
+    // Check JSON string representing { iv, ciphertext/encryptedData/cipher, authTag/tag }
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const obj = JSON.parse(trimmed);
+        if (obj && obj.iv && (obj.ciphertext || obj.encryptedData || obj.cipher || obj.data)) {
+          const ivBuf = decodeBufferAuto(String(obj.iv));
+          const cipherBuf = decodeBufferAuto(String(obj.ciphertext || obj.encryptedData || obj.cipher || obj.data));
+          const tagRaw = obj.authTag || obj.tag;
+          const tagBuf = tagRaw ? decodeBufferAuto(String(tagRaw)) : null;
+          const parsed = tryAesPartsDecrypt(ivBuf, cipherBuf, tagBuf, candidateKeys);
+          if (parsed !== null) return { success: true, data: parsed };
+        }
+        // Raw unencrypted JSON object if valid
+        if (obj && typeof obj === 'object') {
+          return { success: true, data: obj };
+        }
+      } catch {}
+    }
+
+    // Colon-delimited formats: iv:cipher:authTag OR iv:cipher (GCM w/ trailing tag or CBC)
     if (trimmed.includes(':')) {
       const parts = trimmed.split(':');
-      const key = derive32ByteKey(keyString);
-
       if (parts.length === 3) {
-        // GCM: iv : cipher : authTag
-        const iv = Buffer.from(parts[0], 'hex');
-        const cipherHex = parts[1];
-        const authTag = Buffer.from(parts[2], 'hex');
-
-        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-        decipher.setAuthTag(authTag);
-        let decrypted = decipher.update(cipherHex, 'hex', 'utf8');
-        decrypted += decipher.final('utf8');
-        return { success: true, data: JSON.parse(decrypted) };
+        const ivBuf = decodeBufferAuto(parts[0]);
+        const cipherBuf = decodeBufferAuto(parts[1]);
+        const tagBuf = decodeBufferAuto(parts[2]);
+        const parsed = tryAesPartsDecrypt(ivBuf, cipherBuf, tagBuf, candidateKeys);
+        if (parsed !== null) return { success: true, data: parsed };
       } else if (parts.length === 2) {
-        // GCM or CBC without separate auth tag
-        const iv = Buffer.from(parts[0], 'hex');
-        const cipherHex = parts[1];
-        try {
-          const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-          let decrypted = decipher.update(cipherHex, 'hex', 'utf8');
-          decrypted += decipher.final('utf8');
-          return { success: true, data: JSON.parse(decrypted) };
-        } catch {
-          // Fallback to CBC
-          const decipherCbc = crypto.createDecipheriv('aes-256-cbc', key, iv.subarray(0, 16));
-          let decrypted = decipherCbc.update(cipherHex, 'hex', 'utf8');
-          decrypted += decipherCbc.final('utf8');
-          return { success: true, data: JSON.parse(decrypted) };
-        }
+        const ivBuf = decodeBufferAuto(parts[0]);
+        const cipherBuf = decodeBufferAuto(parts[1]);
+        const parsed = tryAesPartsDecrypt(ivBuf, cipherBuf, null, candidateKeys);
+        if (parsed !== null) return { success: true, data: parsed };
       }
     }
 
-    // Try base64 decoded string
+    // Try base64 decoded string (could be JSON or colon-delimited AES payload)
     try {
       const decoded = Buffer.from(trimmed, 'base64').toString('utf8');
       if (decoded.startsWith('{') || decoded.startsWith('[')) {
         return { success: true, data: JSON.parse(decoded) };
       }
-    } catch {
-      // ignore
-    }
+      if (decoded.includes(':') && !decoded.includes('\uFFFD')) {
+        const nested = decryptAES256(decoded, keyString);
+        if (nested.success) return nested;
+      }
+    } catch {}
 
-    // Try raw JSON string
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-      return { success: true, data: JSON.parse(trimmed) };
-    }
-
-    return { success: false, error: 'Unrecognized encrypted payload structure' };
+    return { success: false, error: 'Unrecognized encrypted payload structure or key mismatch' };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Decryption failed' };
   }
 }
 
-// Connected SSE clients for instant live push to browser
-const sseClients: Response[] = [];
-
-function broadcastNewOrder(order: any) {
-  const data = JSON.stringify({ type: 'NEW_ORDER', order });
-  for (let i = sseClients.length - 1; i >= 0; i--) {
-    try {
-      sseClients[i].write(`data: ${data}\n\n`);
-    } catch {
-      sseClients.splice(i, 1);
-    }
-  }
-}
-
 /**
- * Universal Decryptor: Decrypts both RSA Private Key locked payloads and AES-256 symmetric ciphertexts
- * Also handles plain JSON objects, URL encoded data, base64 data, etc.
+ * Universal Decryptor: Tries all configured private/master keys against RSA, Hybrid RSA+AES, and AES-256 formats
  */
-function decryptSecurePayload(encryptedInput: any, candidateKeys: string[] = []): { success: boolean; data?: any; error?: string } {
-  // 1. If it's already an object that is not an encrypted envelope, return it directly!
-  if (typeof encryptedInput === 'object' && encryptedInput !== null) {
-    if (!encryptedInput.encKey && !encryptedInput.key && !encryptedInput.cipher && !encryptedInput.ciphertext && !encryptedInput.iv && !encryptedInput.payload) {
-      return { success: true, data: encryptedInput };
-    }
-  }
-
-  // 2. Prepare string representation
-  let payloadStr = typeof encryptedInput === 'string' ? encryptedInput.trim() : '';
-  if (!payloadStr && typeof encryptedInput === 'object' && encryptedInput !== null) {
-    if (typeof encryptedInput.payload === 'string') payloadStr = encryptedInput.payload.trim();
-    else if (typeof encryptedInput.data === 'string') payloadStr = encryptedInput.data.trim();
-    else if (typeof encryptedInput.order === 'string') payloadStr = encryptedInput.order.trim();
-    else payloadStr = JSON.stringify(encryptedInput);
-  }
-
-  if (!payloadStr) {
-    return { success: false, error: 'Empty payload provided' };
-  }
-
-  // 3. Check if it's URL-encoded JSON or URL-encoded ciphertext
-  if (payloadStr.includes('%7B') || payloadStr.includes('%22') || payloadStr.includes('%3A') || payloadStr.includes('+')) {
-    try {
-      const decoded = decodeURIComponent(payloadStr);
-      if (decoded.startsWith('{') || decoded.startsWith('[')) {
-        return { success: true, data: JSON.parse(decoded) };
-      }
-      payloadStr = decoded;
-    } catch {}
-  }
-
-  // 4. Check if it's already a plain JSON string
-  if (payloadStr.startsWith('{') && payloadStr.endsWith('}')) {
-    try {
-      const parsed = JSON.parse(payloadStr);
-      if (!parsed.encKey && !parsed.cipher && !parsed.ciphertext && !parsed.iv && !parsed.payload) {
-        return { success: true, data: parsed };
-      }
-    } catch {}
-  }
-
-  // 5. Check if it's base64 encoded JSON
-  try {
-    const rawB64 = payloadStr.startsWith('b64:') ? payloadStr.substring(4) : payloadStr;
-    const b64Decoded = Buffer.from(rawB64, 'base64').toString('utf8');
-    if (b64Decoded.startsWith('{') || b64Decoded.startsWith('[')) {
-      const parsed = JSON.parse(b64Decoded);
-      if (!parsed.encKey && !parsed.cipher && !parsed.ciphertext && !parsed.iv) {
-        return { success: true, data: parsed };
-      }
-    }
-  } catch {}
-
-  // 6. Gather all available keys to attempt decryption
-  const allKeys = Array.from(new Set([
-    ...candidateKeys,
-    dynamicMasterKey,
-    process.env.PRIVATE_KEY,
+function decryptSecurePayload(encryptedInput: any, explicitKey?: string): { success: boolean; data?: any; error?: string } {
+  const keysToTry = Array.from(new Set([
+    explicitKey,
     process.env.PRIVATE_DECRYPTION_KEY,
     process.env.MASTER_ENCRYPTION_KEY,
-    process.env.MASTER_KEY
-  ].filter(k => Boolean(k && typeof k === 'string' && k.trim())))) as string[];
+    process.env.MASTER_KEY,
+    process.env.ENCRYPTION_KEY
+  ].filter((k): k is string => Boolean(k && k.trim()))));
 
-  // 7. Iterate through keys and attempt decryption
-  for (const keyOrPem of allKeys) {
+  if (keysToTry.length === 0) {
+    return {
+      success: false,
+      error: 'Decryption failed: PRIVATE_DECRYPTION_KEY or MASTER_ENCRYPTION_KEY is not defined in server environment (.env).'
+    };
+  }
+
+  let lastError = 'Decryption failed';
+
+  for (const keyOrPem of keysToTry) {
     try {
-      // A. Hybrid envelope check
+      const payloadStr = typeof encryptedInput === 'string' ? encryptedInput.trim() : JSON.stringify(encryptedInput);
+
+      // 1. Check if input is a Hybrid Envelope object
       if (typeof encryptedInput === 'object' && encryptedInput !== null && (encryptedInput.encKey || encryptedInput.key)) {
         const res = decryptHybridEnvelope(encryptedInput, keyOrPem);
         if (res.success) return res;
+        if (res.error) lastError = res.error;
       } else if (payloadStr.startsWith('{') && payloadStr.endsWith('}')) {
         try {
           const parsed = JSON.parse(payloadStr);
           if (parsed.encKey || parsed.key) {
             const res = decryptHybridEnvelope(parsed, keyOrPem);
             if (res.success) return res;
+            if (res.error) lastError = res.error;
           }
         } catch {}
       }
 
-      // B. RSA Private Key PEM check
+      // 2. Check if key is an RSA Private Key (PEM format)
       const isRsaKey = keyOrPem.includes('BEGIN RSA PRIVATE KEY') ||
-                       keyOrPem.includes('BEGIN PRIVATE KEY') ||
-                       keyOrPem.includes('BEGIN ENCRYPTED PRIVATE KEY');
+        keyOrPem.includes('BEGIN PRIVATE KEY') ||
+        keyOrPem.includes('BEGIN ENCRYPTED PRIVATE KEY');
+
       if (isRsaKey) {
         try {
           const cleaned = payloadStr.replace(/\s+/g, '');
           const isHex = /^[0-9a-fA-F]+$/.test(cleaned) && cleaned.length % 2 === 0;
           const buf = Buffer.from(cleaned, isHex ? 'hex' : 'base64');
           try {
-            const dec = crypto.privateDecrypt(
+            const decrypted = crypto.privateDecrypt(
               { key: keyOrPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
               buf
             );
-            return { success: true, data: JSON.parse(dec.toString('utf8')) };
+            return { success: true, data: JSON.parse(decrypted.toString('utf8')) };
           } catch {
-            const dec = crypto.privateDecrypt(
+            const decrypted = crypto.privateDecrypt(
               { key: keyOrPem, padding: crypto.constants.RSA_PKCS1_PADDING },
               buf
             );
-            return { success: true, data: JSON.parse(dec.toString('utf8')) };
+            return { success: true, data: JSON.parse(decrypted.toString('utf8')) };
           }
         } catch {}
       }
 
-      // C. Symmetric AES-256 decryption
-      const aesRes = decryptAES256(payloadStr, keyOrPem);
-      if (aesRes.success) {
-        return aesRes;
-      }
-    } catch {}
+      // 3. Standard AES-256 decryption
+      const aesRes = decryptAES256(encryptedInput, keyOrPem);
+      if (aesRes.success) return aesRes;
+      if (aesRes.error) lastError = aesRes.error;
+    } catch (err: any) {
+      lastError = err?.message || 'Decryption failed';
+    }
   }
 
-  return { success: false, error: 'Decryption failed: Ciphertext could not be unlocked with known keys.' };
+  return { success: false, error: lastError };
 }
 
 /**
@@ -386,35 +399,6 @@ const systemAuditTrail: any[] = [];
 
 // ======================== API ROUTES ======================== //
 
-// Real-time Server-Sent Events stream for instant order delivery to frontend
-app.get('/api/orders/stream', (req: Request, res: Response) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-
-  sseClients.push(res);
-  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', count: activeOrdersStore.length })}\n\n`);
-
-  req.on('close', () => {
-    const idx = sseClients.indexOf(res);
-    if (idx !== -1) sseClients.splice(idx, 1);
-  });
-});
-
-// Dynamic Key Sync endpoint (allows UI to update the active decryption key in server memory)
-app.post('/api/config/key', (req: Request, res: Response) => {
-  const { key } = req.body || {};
-  if (key && typeof key === 'string' && key.trim()) {
-    dynamicMasterKey = key.trim();
-  }
-  res.json({ success: true, keyConfigured: Boolean(dynamicMasterKey) });
-});
-
-app.get('/api/config/key', (_req: Request, res: Response) => {
-  res.json({ success: true, hasKey: Boolean(dynamicMasterKey) });
-});
-
 // Decrypt endpoint for client verification
 app.post('/api/decrypt', (req: Request, res: Response) => {
   const { payload, key } = req.body;
@@ -422,7 +406,7 @@ app.post('/api/decrypt', (req: Request, res: Response) => {
     return res.status(400).json({ success: false, error: 'Missing encrypted payload' });
   }
 
-  const result = decryptSecurePayload(payload, key ? [key] : [dynamicMasterKey]);
+  const result = decryptSecurePayload(payload, key || PRIVATE_DECRYPTION_KEY);
   if (!result.success) {
     return res.status(422).json({ success: false, error: result.error });
   }
@@ -438,193 +422,505 @@ app.post('/api/encrypt', (req: Request, res: Response) => {
   }
 
   try {
-    const encrypted = encryptAES256GCM(data, key || dynamicMasterKey || 'CTC_DEFAULT_SECRET');
+    const encrypted = encryptAES256GCM(data, key || MASTER_KEY);
     res.json({ success: true, payload: encrypted });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Central Order Reception Pipeline (Mounts on /api/receive-order, /api/orders/receive, /api/orders, webhooks)
-// NON-BLOCKING: Always accepts data from Website A, decrypts if key matches or stores raw payload, and broadcasts immediately!
-async function handleReceiveOrder(req: Request, res: Response) {
-  const rawBody = (typeof req.body === 'object' && req.body !== null) ? req.body : {};
-  const rawString = typeof req.body === 'string' ? req.body : '';
-  const query = req.query || {};
+// =========================================================================
+// API ENDPOINT: POST /api/receive-order  (and /api/orders/receive)
+// Primary Secure Data Receiver for Website 1 (Lock-Travel-Unlock Pipeline)
+// 1. Verifies HMAC-SHA256 Signature (hmacVerified: true)
+// 2. Decrypts Payload using Environment Private/Master Key (AES-256 / RSA)
+// 3. Extracts & Uploads All Attached Files, PDFs & Images
+// 4. Normalizes Complete Form & Descriptive Data (legalData, registrationData, party1, party2, etc.)
+// 5. Generates Official Legal Agreement PDF & Saves Permanently to Supabase
+// 6. Broadcasts Instant Operational Alert to Telegram
+// =========================================================================
 
-  // Extract payload from any standard field or raw string
-  let payload: any = rawBody.payload ?? rawBody.data ?? rawBody.order ?? query.payload ?? query.data;
-  if (payload === undefined) {
-    if (rawString.trim()) {
-      payload = rawString.trim();
-    } else if (Object.keys(rawBody).length > 0) {
-      payload = rawBody;
+function timingSafeCompareSig(incomingRaw: string, expectedHex: string, expectedBase64: string): boolean {
+  const normalizedIncoming = incomingRaw.replace(/^sha256=/i, '').trim();
+  const candidates = [expectedHex.toLowerCase(), expectedHex.toUpperCase(), expectedBase64];
+
+  for (const expected of candidates) {
+    const a = Buffer.from(normalizedIncoming, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      return true;
     }
   }
+  return false;
+}
 
-  if (!payload) {
-    payload = req.body || {};
+function verifyInboundHmac(req: Request, payload: any): { ok: boolean; hmacVerified: boolean; status?: number; error?: string } {
+  const incomingSig = (req.headers['x-submission-signature'] as string) ||
+                      (req.headers['x-hmac-signature'] as string) ||
+                      (req.headers['x-signature'] as string) ||
+                      (req.headers['x-webhook-signature'] as string) ||
+                      req.body?.signature ||
+                      req.body?.hmac ||
+                      req.body?.hmacSignature;
+
+  const configuredHmacSecret = SUBMISSION_HMAC_SECRET;
+  const secretToUse = configuredHmacSecret || (incomingSig ? PRIVATE_DECRYPTION_KEY : '');
+
+  if (!secretToUse) {
+    return { ok: true, hmacVerified: false };
   }
 
-  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  const source = rawBody.source || query.source || 'Website A';
-
-  // Security Check: Secret Password / HMAC verification (NON-BLOCKING)
-  const incomingSecretOrSig = (req.headers['x-hmac-secret'] as string) ||
-                              (req.headers['x-submission-signature'] as string) ||
-                              (req.headers['x-hmac-signature'] as string) ||
-                              (req.headers['website_secret_key'] as string) ||
-                              (req.headers['authorization'] as string) ||
-                              rawBody.signature ||
-                              rawBody.secret ||
-                              rawBody.website_secret_key ||
-                              query.signature ||
-                              query.secret;
-
-  const websiteSecret = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET;
-  let hmacVerified = false;
-
-  if (websiteSecret && incomingSecretOrSig) {
-    const rawSecret = String(incomingSecretOrSig).replace(/^Bearer\s+/i, '').trim();
-    if (rawSecret === websiteSecret) {
-      hmacVerified = true;
-    } else {
-      try {
-        const payloadStringForHmac = typeof payload === 'string' ? payload : JSON.stringify(payload);
-        const computedSig = crypto.createHmac('sha256', websiteSecret).update(payloadStringForHmac).digest('hex');
-        const sigBuf = Buffer.from(rawSecret, 'utf8');
-        const compBuf = Buffer.from(computedSig, 'utf8');
-        if (sigBuf.length === compBuf.length && crypto.timingSafeEqual(sigBuf, compBuf)) {
-          hmacVerified = true;
-        }
-      } catch {}
-    }
-  } else if (!websiteSecret) {
-    hmacVerified = true;
+  if (configuredHmacSecret && !incomingSig) {
+    return {
+      ok: false,
+      hmacVerified: false,
+      status: 401,
+      error: 'Unauthorized: Missing HMAC signature (x-submission-signature / x-hmac-signature header or signature field required)'
+    };
   }
 
-  // Collect candidate decryption keys passed via headers, body, query, or runtime
-  const candidateKeys = [
-    req.headers['x-private-key'],
-    req.headers['x-master-key'],
-    rawBody.key,
-    rawBody.privateKey,
-    rawBody.masterKey,
-    query.key,
-    query.masterKey,
-    dynamicMasterKey,
-    process.env.PRIVATE_KEY,
-    process.env.PRIVATE_DECRYPTION_KEY,
-    process.env.MASTER_ENCRYPTION_KEY,
-    process.env.MASTER_KEY
-  ].filter(Boolean) as string[];
+  if (!incomingSig) {
+    return { ok: true, hmacVerified: false };
+  }
 
-  // Decrypt payload
-  const decryptResult = decryptSecurePayload(payload, candidateKeys);
-  const isDecrypted = decryptResult.success;
-  const orderData = isDecrypted ? decryptResult.data : (typeof payload === 'object' && payload !== null ? payload : {});
-
-  // Determine sequential Order ID
-  const orderId = (orderData?.id && String(orderData.id).startsWith('CTC-2026-'))
-    ? orderData.id
-    : `CTC-2026-${Math.floor(2020 + (systemAuditTrail.length || 0) + (activeOrdersStore.length || 0) + 1)}`;
-
-  const clientName = orderData.clientName || orderData.party1?.fullName || orderData.party2?.fullName || 'Website A Client';
-  const formName = orderData.formName || orderData.documentTitle || 'Legal Compliance Request';
-  const clientPhone = orderData.clientPhone || orderData.party1?.phone || orderData.party2?.phone || 'Not Provided';
-  const duty = Number(orderData.stampDutyValue || orderData.stampDutyAmount || 500);
-
-  // Media & Photos
-  let mediaResult: { photoUrl: string | null; mediaUrls: string[] } = { photoUrl: null, mediaUrls: [] };
   try {
-    mediaResult = await processOrderMedia(orderData, orderId);
-  } catch {}
+    const payloadStr = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const timestamp = req.body?.timestamp || (req.headers['x-timestamp'] as string) || (req.headers['x-submission-timestamp'] as string);
+    const rawBody = (req as any).rawBody as string | undefined;
 
-  const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : '';
-  const onDemandPdfUrl = `${hostUrl}/api/documents/render-pdf?orderId=${orderId}`;
+    const candidateMessages: string[] = [payloadStr];
+    if (timestamp !== undefined && timestamp !== null && String(timestamp).length > 0) {
+      candidateMessages.push(`${timestamp}.${payloadStr}`);
+      candidateMessages.push(`${timestamp}:${payloadStr}`);
+    }
+    if (rawBody) {
+      candidateMessages.push(rawBody);
+    }
+    if (req.body && typeof req.body === 'object') {
+      const bodyWithoutSig = { ...req.body };
+      delete bodyWithoutSig.signature;
+      delete bodyWithoutSig.hmac;
+      delete bodyWithoutSig.hmacSignature;
+      candidateMessages.push(JSON.stringify(bodyWithoutSig));
+    }
 
-  // Complete order record
-  const completeOrderRecord = {
-    id: orderId,
-    referenceCode: orderData.referenceCode || `WA-RECV-${Date.now().toString().slice(-4)}`,
-    category: orderData.category || 'legal',
-    formType: orderData.formType || 'custom_document',
-    formName: formName,
-    clientName: clientName,
-    clientPhone: clientPhone,
-    clientEmail: orderData.clientEmail || '',
-    stampDutyValue: duty,
-    status: isDecrypted ? 'decrypted' : 'pending_decryption',
-    legalData: orderData.legalData || {
-      documentTitle: formName,
-      party1: orderData.party1 || { fullName: clientName, phone: clientPhone },
-      party2: orderData.party2,
-      clauses: orderData.clauses,
-      propertyDetails: orderData.propertyDetails,
-      state: orderData.state || 'Delhi'
-    },
-    registrationData: orderData.registrationData || null,
-    stampData: {
-      pdfUrl: onDemandPdfUrl,
-      verified: false,
-      provider: 'On-Demand In-Memory Generator (No Storage)'
-    },
-    photoUrl: mediaResult.photoUrl || orderData.photoUrl || orderData.photo || null,
-    mediaUrls: mediaResult.mediaUrls || [],
-    encryptedPayload: !isDecrypted ? (typeof payload === 'string' ? payload : JSON.stringify(payload)) : undefined,
-    rawPayload: orderData,
-    createdAt: orderData.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    source: source || 'Website A',
-    signatureVerified: hmacVerified
-  };
+    const secrets = Array.from(new Set([
+      configuredHmacSecret,
+      process.env.PRIVATE_DECRYPTION_KEY,
+      process.env.MASTER_ENCRYPTION_KEY,
+      process.env.MASTER_KEY
+    ].filter((s): s is string => Boolean(s && s.trim()))));
 
-  // Prepend to active in-memory store so it immediately appears in all admin views
-  activeOrdersStore.unshift(completeOrderRecord);
+    // Strict: if SUBMISSION_HMAC_SECRET is explicitly configured, verify with it first (and only fall back if not set)
+    const secretsToCheck = configuredHmacSecret ? [configuredHmacSecret] : secrets;
 
-  // Live broadcast via Server-Sent Events to all open admin panels!
-  broadcastNewOrder(completeOrderRecord);
+    for (const secret of secretsToCheck) {
+      for (const msg of candidateMessages) {
+        const hex = crypto.createHmac('sha256', secret).update(msg, 'utf8').digest('hex');
+        const b64 = crypto.createHmac('sha256', secret).update(msg, 'utf8').digest('base64');
+        if (timingSafeCompareSig(String(incomingSig), hex, b64)) {
+          return { ok: true, hmacVerified: true };
+        }
+      }
+    }
 
-  // Sync to Supabase if configured
+    return {
+      ok: false,
+      hmacVerified: false,
+      status: 403,
+      error: 'Forbidden: HMAC-SHA256 verification failed. Signature mismatch or tampered data.'
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      hmacVerified: false,
+      status: 403,
+      error: 'HMAC verification error: ' + err.message
+    };
+  }
+}
+
+async function saveOrderToSupabase(orderRecord: any): Promise<{ saved: boolean; error?: string }> {
   const resolvedSupabase = resolveSupabaseUrl();
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-  if (resolvedSupabase && supabaseKey) {
+
+  if (!resolvedSupabase || !supabaseKey) {
+    return { saved: false, error: 'Supabase credentials (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_ANON_KEY) not configured' };
+  }
+
+  let rowPayload: Record<string, any> = {
+    id: orderRecord.id,
+    reference_code: orderRecord.referenceCode,
+    client_name: orderRecord.clientName,
+    client_phone: orderRecord.clientPhone,
+    client_email: orderRecord.clientEmail || '',
+    form_type: orderRecord.formType || 'custom_document',
+    form_name: orderRecord.formName,
+    category: orderRecord.category,
+    stamp_duty_value: orderRecord.stampDutyValue,
+    status: orderRecord.status,
+    legal_data: orderRecord.legalData || null,
+    registration_data: orderRecord.registrationData || null,
+    stamp_data: orderRecord.stampData || null,
+    raw_payload: orderRecord.rawPayload || null,
+    photo_url: orderRecord.photoUrl || null,
+    media_urls: orderRecord.mediaUrls || [],
+    created_at: orderRecord.createdAt,
+    updated_at: orderRecord.updatedAt,
+    source: orderRecord.source
+  };
+
+  // Upsert with automatic PostgREST missing-column retry so partial Supabase schemas never reject the order
+  for (let attempt = 0; attempt < 8; attempt++) {
     try {
-      fetch(`${resolvedSupabase}/rest/v1/orders`, {
+      const supaRes = await fetch(`${resolvedSupabase}/rest/v1/orders?on_conflict=id`, {
         method: 'POST',
         headers: {
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
           'Content-Type': 'application/json',
-          'Prefer': 'resolution=merge-duplicates'
+          'Prefer': 'resolution=merge-duplicates,return=representation'
         },
-        body: JSON.stringify({
-          id: orderId,
-          reference_code: completeOrderRecord.referenceCode,
-          client_name: clientName,
-          client_phone: clientPhone,
-          form_name: formName,
-          category: completeOrderRecord.category,
-          stamp_duty_value: duty,
-          status: completeOrderRecord.status,
-          legal_data: completeOrderRecord.legalData,
-          registration_data: completeOrderRecord.registrationData,
-          stamp_data: completeOrderRecord.stampData,
-          raw_payload: completeOrderRecord.rawPayload,
-          photo_url: completeOrderRecord.photoUrl,
-          media_urls: completeOrderRecord.mediaUrls,
-          created_at: completeOrderRecord.createdAt,
-          updated_at: completeOrderRecord.updatedAt,
-          source: completeOrderRecord.source
-        })
-      }).catch(() => {});
-    } catch {}
+        body: JSON.stringify(rowPayload)
+      });
+
+      if (supaRes.ok) {
+        return { saved: true };
+      }
+
+      const errText = await supaRes.text();
+      // Detect PostgREST PGRST204 missing column error: Could not find the '<col>' column of 'orders'
+      const colMatch = errText.match(/Could not find the '([^']+)' column/i) ||
+                       errText.match(/column "([^"]+)" of relation "orders" does not exist/i);
+      if (colMatch && colMatch[1] && colMatch[1] in rowPayload) {
+        const missingCol = colMatch[1];
+        console.warn(`[Supabase] Column '${missingCol}' not in orders table, preserving inside metadata and retrying.`);
+        const nextPayload = { ...rowPayload };
+        delete nextPayload[missingCol];
+        rowPayload = nextPayload;
+        continue;
+      }
+
+      return { saved: false, error: `Supabase HTTP ${supaRes.status}: ${errText}` };
+    } catch (err: any) {
+      return { saved: false, error: err?.message || 'Supabase network error' };
+    }
   }
 
-  // Telegram alert
+  return { saved: false, error: 'Supabase insert failed after column fallback retries' };
+}
+
+const receiveEndpointDocs = (_req: Request, res: Response) => {
+  res.json({
+    status: 'ACTIVE',
+    endpoints: ['/api/receive-order', '/api/orders/receive'],
+    method: 'POST',
+    description: 'Secure Data Receiver & PDF/Media Processing Pipeline for Website 1',
+    security: {
+      encryption: 'AES-256-GCM / AES-256-CBC / RSA-OAEP (configured via PRIVATE_DECRYPTION_KEY / MASTER_ENCRYPTION_KEY)',
+      integrity: 'HMAC-SHA256 (via SUBMISSION_HMAC_SECRET in header or payload)',
+      supportedHeaders: ['x-submission-signature', 'x-hmac-signature', 'x-signature']
+    }
+  });
+};
+
+app.get('/api/receive-order', receiveEndpointDocs);
+app.get('/api/orders/receive', receiveEndpointDocs);
+
+async function handleReceiveOrder(req: Request, res: Response) {
+  const body = req.body || {};
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+  // Support multiple outer payload wrappers from Website 1
+  let encryptedInput: any =
+    body.payload ??
+    body.encryptedPayload ??
+    body.encryptedData ??
+    body.data ??
+    (body.iv && (body.ciphertext || body.encryptedData || body.cipher || body.data) ? body : null);
+
+  if (!encryptedInput && Object.keys(body).length > 0 && !body.signature && !body.hmac) {
+    encryptedInput = body;
+  }
+
+  if (!encryptedInput || (typeof encryptedInput !== 'string' && typeof encryptedInput !== 'object')) {
+    return res.status(400).json({
+      success: false,
+      hmacVerified: false,
+      error: 'Invalid request: "payload" (or encryptedPayload / data / iv+ciphertext) is required'
+    });
+  }
+
+  // 1. HMAC-SHA256 Integrity Verification
+  const hmacCheck = verifyInboundHmac(req, encryptedInput);
+  if (!hmacCheck.ok) {
+    return res.status(hmacCheck.status || 403).json({
+      success: false,
+      hmacVerified: false,
+      error: hmacCheck.error
+    });
+  }
+
+  // 2. Decrypt Payload using Environment Private / Master Key
+  const decryptResult = decryptSecurePayload(encryptedInput);
+  if (!decryptResult.success) {
+    return res.status(422).json({
+      success: false,
+      hmacVerified: hmacCheck.hmacVerified,
+      error: 'Decryption failed: ' + (decryptResult.error || 'Private key mismatch or corrupted ciphertext')
+    });
+  }
+
+  const orderData = decryptResult.data;
+  if (!orderData || typeof orderData !== 'object') {
+    return res.status(422).json({
+      success: false,
+      hmacVerified: hmacCheck.hmacVerified,
+      error: 'Decrypted data is not a valid JSON object'
+    });
+  }
+
+  // 3. Extract & Preserve Order Identifiers and Core Fields
+  const incomingOrderId = orderData.orderId || orderData.id || orderData.order_id;
+  const orderId = (incomingOrderId && String(incomingOrderId).trim().length > 0)
+    ? String(incomingOrderId).trim()
+    : `CTC-2026-${Math.floor(2020 + (systemAuditTrail.length || 0) + (activeOrdersStore.length || 0))}`;
+
+  const inferredCategory: 'legal' | 'registration' =
+    orderData.category === 'registration' || (orderData.registrationData && !orderData.legalData)
+      ? 'registration'
+      : 'legal';
+
+  const formName =
+    orderData.formName ||
+    orderData.documentTitle ||
+    orderData.legalData?.documentTitle ||
+    orderData.registrationData?.serviceTitle ||
+    orderData.serviceName ||
+    'Legal Service Agreement';
+
+  const formType =
+    orderData.formType ||
+    orderData.documentType ||
+    orderData.legalData?.documentType ||
+    orderData.registrationData?.serviceType ||
+    'custom_document';
+
+  const state =
+    orderData.state ||
+    orderData.legalData?.state ||
+    orderData.registrationData?.state ||
+    'Delhi';
+
+  const rawDuty =
+    orderData.stampDutyAmount ??
+    orderData.stampDutyValue ??
+    orderData.legalData?.stampDutyAmount ??
+    orderData.stampData?.stampDutyAmount;
+  const duty = (rawDuty !== undefined && rawDuty !== null && !Number.isNaN(Number(rawDuty)))
+    ? Number(rawDuty)
+    : (inferredCategory === 'legal' ? 500 : 0);
+
+  const party1Obj = orderData.legalData?.party1 || orderData.party1 || {};
+  const party2Obj = orderData.legalData?.party2 || orderData.party2 || undefined;
+
+  const clientName =
+    orderData.clientName ||
+    party1Obj.fullName ||
+    orderData.registrationData?.applicantName ||
+    party2Obj?.fullName ||
+    'Client';
+
+  const clientPhone =
+    orderData.clientPhone ||
+    party1Obj.phone ||
+    orderData.registrationData?.contactNumber ||
+    party2Obj?.phone ||
+    '';
+
+  const clientEmail =
+    orderData.clientEmail ||
+    party1Obj.email ||
+    orderData.registrationData?.email ||
+    party2Obj?.email ||
+    '';
+
+  // 4. Upload All Photos, PDFs, & File Attachments to Cloudinary / Local Store
+  const mediaResult = await processOrderMedia(orderData, orderId);
+
+  // Collect all descriptive extra fields from orderData so nothing sent by Website 1 is lost
+  const knownSystemKeys = new Set([
+    'id', 'orderId', 'order_id', 'referenceCode', 'category', 'legalGroup', 'subCategory',
+    'stampDutyPaidBy', 'formType', 'formName', 'clientName', 'clientPhone', 'clientEmail',
+    'stampDutyValue', 'stampDutyAmount', 'createdAt', 'updatedAt', 'status', 'legalData',
+    'registrationData', 'stampData', 'party1', 'party2', 'propertyDetails', 'affidavitDetails',
+    'clauses', 'witnesses', 'state', 'executionDate', 'executionPlace', 'documentTitle',
+    'documentType', 'photo', 'applicantPhoto', 'photoUrl', 'mediaUrls', 'uploadedFiles',
+    'photos', 'attachments', 'files', 'documents', 'signatureImage', 'source', 'signatureVerified'
+  ]);
+  const topLevelExtraFields: Record<string, any> = {};
+  for (const [k, v] of Object.entries(orderData)) {
+    if (!knownSystemKeys.has(k) && v !== undefined && v !== null && v !== '') {
+      topLevelExtraFields[k] = v;
+    }
+  }
+
+  const normalizedLegalData = (inferredCategory === 'legal' || orderData.legalData || orderData.party1 || orderData.party2)
+    ? {
+        ...(orderData.legalData || {}),
+        documentType: orderData.legalData?.documentType || formType,
+        documentTitle: orderData.legalData?.documentTitle || formName,
+        stampDutyAmount: duty,
+        state,
+        executionDate: orderData.legalData?.executionDate || orderData.executionDate || new Date().toISOString().split('T')[0],
+        executionPlace: orderData.legalData?.executionPlace || orderData.executionPlace || state,
+        party1: {
+          fullName: party1Obj.fullName || clientName,
+          phone: party1Obj.phone || clientPhone,
+          email: party1Obj.email || clientEmail,
+          address: party1Obj.address || '',
+          ...party1Obj
+        },
+        ...(party2Obj ? {
+          party2: {
+            fullName: party2Obj.fullName || '',
+            phone: party2Obj.phone || '',
+            email: party2Obj.email || '',
+            address: party2Obj.address || '',
+            ...party2Obj
+          }
+        } : {}),
+        ...(orderData.legalData?.propertyDetails || orderData.propertyDetails ? {
+          propertyDetails: orderData.legalData?.propertyDetails || orderData.propertyDetails
+        } : {}),
+        ...(orderData.legalData?.affidavitDetails || orderData.affidavitDetails ? {
+          affidavitDetails: orderData.legalData?.affidavitDetails || orderData.affidavitDetails
+        } : {}),
+        ...(orderData.legalData?.clauses || orderData.clauses ? {
+          clauses: orderData.legalData?.clauses || orderData.clauses
+        } : {}),
+        ...(orderData.legalData?.witnesses || orderData.witnesses ? {
+          witnesses: orderData.legalData?.witnesses || orderData.witnesses
+        } : {}),
+        extraFields: {
+          ...topLevelExtraFields,
+          ...(orderData.legalData?.extraFields || {})
+        }
+      }
+    : null;
+
+  const normalizedRegistrationData = (inferredCategory === 'registration' || orderData.registrationData)
+    ? {
+        serviceType: formType,
+        serviceTitle: formName,
+        applicantName: clientName,
+        panNumber: orderData.panNumber || '',
+        aadhaarNumber: orderData.aadhaarNumber || '',
+        contactNumber: clientPhone,
+        email: clientEmail,
+        documentChecklist: [],
+        ...(orderData.registrationData || {}),
+        extraFields: {
+          ...topLevelExtraFields,
+          ...(orderData.registrationData?.extraFields || {})
+        }
+      }
+    : null;
+
+  // 5. Generate Clean Legal Document PDF (if legal or legalData present)
+  let pdfBuffer: Buffer;
+  try {
+    pdfBuffer = await generateLegalAgreementPdf({
+      ...orderData,
+      id: orderId,
+      formName,
+      clientName,
+      clientPhone,
+      clientEmail,
+      state,
+      stampDutyValue: duty,
+      legalData: normalizedLegalData || undefined,
+      overlayProvision: true
+    });
+  } catch (pdfErr: any) {
+    return res.status(500).json({
+      success: false,
+      hmacVerified: hmacCheck.hmacVerified,
+      error: 'Legal document PDF generation failed: ' + pdfErr.message
+    });
+  }
+
+  // 6. Upload Generated PDF to Cloudinary (or Local Secure Document Store)
+  const uploadResult = await uploadPdfToCloudinary(pdfBuffer, orderId, `Legal_Agreement_${orderId}.pdf`);
+  const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : '';
+  const fullPdfDownloadUrl = uploadResult.url.startsWith('http') ? uploadResult.url : `${hostUrl}${uploadResult.url}`;
+
+  // 7. Build Complete Persistent Order Record (All Described Data + Media + Files)
+  const completeOrderRecord = {
+    id: orderId,
+    referenceCode: orderData.referenceCode || `WA-RECV-${Date.now()}`,
+    category: inferredCategory,
+    legalGroup: orderData.legalGroup,
+    subCategory: orderData.subCategory,
+    stampDutyPaidBy: orderData.stampDutyPaidBy,
+    formType,
+    formName,
+    clientName,
+    clientPhone: clientPhone || 'Not Provided',
+    clientEmail,
+    state,
+    stampDutyValue: duty,
+    status: orderData.stampData?.verified ? 'confirmed_stamp_attached' : (orderData.status || 'decrypted'),
+    legalData: normalizedLegalData,
+    registrationData: normalizedRegistrationData,
+    stampData: {
+      ...(orderData.stampData || {}),
+      pdfUrl: fullPdfDownloadUrl,
+      verified: Boolean(orderData.stampData?.verified),
+      provider: uploadResult.provider
+    },
+    photoUrl: mediaResult.photoUrl,
+    mediaUrls: mediaResult.mediaUrls,
+    uploadedFiles: mediaResult.uploadedFiles,
+    rawPayload: {
+      ...orderData,
+      state,
+      clientEmail,
+      uploadedFiles: mediaResult.uploadedFiles
+    },
+    createdAt: orderData.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: body.source || orderData.source || 'Website 1 (API Receive)',
+    signatureVerified: hmacCheck.hmacVerified
+  };
+
+  // Upsert in active in-memory store
+  const existingIdx = activeOrdersStore.findIndex((o) => o.id === orderId);
+  if (existingIdx >= 0) {
+    activeOrdersStore[existingIdx] = completeOrderRecord;
+  } else {
+    activeOrdersStore.unshift(completeOrderRecord);
+  }
+
+  // 8. Await Permanent Storage in Supabase Database
+  const supabaseResult = await saveOrderToSupabase(completeOrderRecord);
+
+  // 9. Dispatch Instant Telegram Alert to Admin
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
-  const telegramMessage = `🔔 *नया ऑर्डर आ चुका है!*\n\n• *ऑर्डर आईडी:* \`${orderId}\`\n• *क्लाइंट का नाम:* *${clientName}*\n• *सेवा / फॉर्म:* ${formName}\n• *मोबाइल नंबर:* ${clientPhone}\n• *स्टाम्प ड्यूटी:* ₹${duty}/-\n• *डिक्रिप्शन:* ${isDecrypted ? 'सफलतापूर्वक अनलॉक्ड' : 'रॉ पेलोड सेव'}\n• *स्रोत:* ${source}`;
+  const telegramMessage = `🔔 *नया ऑर्डर आ चुका है!*
+
+• *ऑर्डर आईडी:* \`${orderId}\`
+• *क्लाइंट का नाम:* *${clientName}*
+• *सेवा / फॉर्म:* ${formName}
+• *मोबाइल नंबर:* ${clientPhone || 'N/A'}
+• *ईमेल:* ${clientEmail || 'N/A'}
+• *राज्य:* ${state}
+• *स्टाम्प ड्यूटी:* ₹${duty}/-
+• *अटैच्ड फाइल्स:* ${mediaResult.uploadedFiles.length}
+• *HMAC वेरिफ़ाइड:* ${hmacCheck.hmacVerified ? '✅ YES' : '⚠️ NO'}
+
+📄 *दस्तावेज़ लिंक:* [PDF देखें](${fullPdfDownloadUrl})`;
 
   const notificationEntry = {
     id: `tg-${Date.now()}`,
@@ -632,7 +928,7 @@ async function handleReceiveOrder(req: Request, res: Response) {
     orderId,
     clientName,
     serviceName: formName,
-    category: orderData.category || 'legal',
+    category: inferredCategory,
     channel: tgChatId,
     status: botToken ? 'Delivered' : 'Simulated',
     messageText: telegramMessage
@@ -648,104 +944,64 @@ async function handleReceiveOrder(req: Request, res: Response) {
           chat_id: tgChatId,
           text: telegramMessage,
           parse_mode: 'Markdown',
-          disable_web_page_preview: true
+          disable_web_page_preview: false
         })
-      }).catch(() => {});
+      }).catch((err) => {
+        console.warn('Telegram send error:', err);
+      });
     } catch {}
   }
 
-  // Audit log
-  systemAuditTrail.unshift({
+  // 10. Record in Audit Trail
+  const auditEntry = {
     id: `log-${Date.now()}`,
     timestamp: new Date().toISOString(),
     orderId,
     type: 'order_received_pipeline',
-    message: `Order ${orderId} received from ${source} (${clientIp}). Status: ${isDecrypted ? 'Decrypted' : 'Stored raw for UI unlock'}.`,
-    status: 'success'
-  });
+    message: `Order ${orderId} received from Website 1 (${clientIp}), HMAC=${hmacCheck.hmacVerified}, decrypted, ${mediaResult.uploadedFiles.length} file(s) uploaded, SupabaseSaved=${supabaseResult.saved}.`,
+    status: supabaseResult.saved ? 'success' : 'warning'
+  };
+  systemAuditTrail.unshift(auditEntry);
 
-  return res.status(200).json({
+  // 11. Return Success Response
+  return res.json({
     success: true,
-    status: 'PROCESSED_AND_STORED',
+    status: 'PROCESSED',
     orderId,
     clientName,
-    formName,
     clientPhone,
+    clientEmail,
+    formName,
+    state,
     stampDutyAmount: duty,
-    decrypted: isDecrypted,
-    hmacVerified,
+    pdfDownloadUrl: fullPdfDownloadUrl,
+    photoUrl: mediaResult.photoUrl,
+    mediaUrls: mediaResult.mediaUrls,
+    uploadedFiles: mediaResult.uploadedFiles,
+    storageProvider: uploadResult.provider,
+    telegramNotification: botToken ? 'Delivered' : 'Simulated',
+    hmacVerified: hmacCheck.hmacVerified,
+    supabaseSaved: supabaseResult.saved,
+    supabaseError: supabaseResult.error || null,
     order: completeOrderRecord,
     processedAt: new Date().toISOString()
   });
 }
 
-// Inbound Receiver Route Endpoints
-const inboundRoutes = [
-  '/api/receive-order',
-  '/api/receive-order/',
-  '/api/orders/receive',
-  '/api/orders/receive/',
-  '/api/webhook/website-a',
-  '/api/webhook',
-  '/receive-order'
-];
+app.post('/api/receive-order', handleReceiveOrder);
+app.post('/api/orders/receive', handleReceiveOrder);
 
-inboundRoutes.forEach((route) => {
-  app.all(route, (req: Request, res: Response) => {
-    if (req.method === 'GET' && !req.query.payload && !req.query.data) {
-      return res.json({
-        success: true,
-        status: 'ACTIVE',
-        endpoint: req.path,
-        message: 'Website B Inbound Order Receiver is active and ready for POST requests.'
-      });
-    }
-    return handleReceiveOrder(req, res);
-  });
-});
-
-// On-Demand In-Memory Dynamic PDF Streaming Route (Never saves to disk or Cloudinary!)
-app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {
-  const orderId = req.query.orderId as string;
-  const isOverlay = req.query.overlay === 'true';
-
-  if (!orderId) {
-    return res.status(400).send('Missing orderId query parameter');
-  }
-
-  const order = activeOrdersStore.find((o) => o.id === orderId);
-  if (!order) {
-    return res.status(404).send('Order not found in database / memory');
-  }
-
-  try {
-    const pdfBuf = await generateLegalAgreementPdf({
-      ...order,
-      overlayProvision: isOverlay
-    }, {
-      overlayProvision: isOverlay,
-      topBlankSpace: 260
-    });
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="Legal_Format_${orderId}.pdf"`);
-    res.setHeader('Content-Length', pdfBuf.length);
-    res.send(pdfBuf);
-  } catch (err: any) {
-    res.status(500).send('Failed to generate PDF dynamically: ' + err.message);
-  }
-});
-
-
-// Centralized Orders Retrieval & Submission Endpoint for Admin Panel & External Inbound
-app.post('/api/orders', handleReceiveOrder);
+// Centralized Orders Retrieval Endpoint for Admin Panel (Fetches from Supabase + Active Store)
 app.get('/api/orders', async (_req: Request, res: Response) => {
   const resolvedSupabase = resolveSupabaseUrl();
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
   const orderMap = new Map<string, any>();
 
-  // 1. Query Supabase if credentials exist
+  // 1. Load active in-memory store orders
+  activeOrdersStore.forEach((o) => orderMap.set(o.id, o));
+
+  // 2. Query Supabase if credentials exist
   if (resolvedSupabase && supabaseKey) {
     try {
       const supaRes = await fetch(`${resolvedSupabase}/rest/v1/orders?select=*&order=created_at.desc`, {
@@ -760,26 +1016,30 @@ app.get('/api/orders', async (_req: Request, res: Response) => {
       if (supaRes.ok) {
         const rows = await supaRes.json();
         rows.forEach((r: any) => {
+          const existing = orderMap.get(r.id);
           orderMap.set(r.id, {
             id: r.id,
             referenceCode: r.reference_code || r.id,
-            category: r.category || 'legal',
-            formType: r.form_type || 'custom_document',
-            formName: r.form_name || 'Legal Document',
-            clientName: r.client_name || 'Client',
-            clientPhone: r.client_phone || '',
-            clientEmail: r.client_email || '',
-            stampDutyValue: r.stamp_duty_value || 0,
-            status: r.status || 'received',
-            legalData: r.legal_data,
-            registrationData: r.registration_data,
-            stampData: r.stamp_data,
-            photoUrl: r.photo_url || null,
-            mediaUrls: r.media_urls || [],
-            rawPayload: r.raw_payload || null,
-            createdAt: r.created_at,
-            updatedAt: r.updated_at,
-            source: r.source || 'Website A'
+            category: r.category || existing?.category || 'legal',
+            formType: r.form_type || r.raw_payload?.formType || existing?.formType || 'custom_document',
+            formName: r.form_name || existing?.formName || 'Legal Document',
+            clientName: r.client_name || existing?.clientName || 'Client',
+            clientPhone: r.client_phone || existing?.clientPhone || '',
+            clientEmail: r.client_email || r.raw_payload?.clientEmail || existing?.clientEmail || '',
+            state: r.state || r.legal_data?.state || r.raw_payload?.state || existing?.state || 'Delhi',
+            stampDutyValue: r.stamp_duty_value ?? existing?.stampDutyValue ?? 0,
+            status: r.status || existing?.status || 'decrypted',
+            legalData: r.legal_data || existing?.legalData,
+            registrationData: r.registration_data || existing?.registrationData,
+            stampData: r.stamp_data || existing?.stampData,
+            photoUrl: r.photo_url || existing?.photoUrl || null,
+            mediaUrls: r.media_urls || existing?.mediaUrls || [],
+            uploadedFiles: r.raw_payload?.uploadedFiles || existing?.uploadedFiles || [],
+            rawPayload: r.raw_payload || existing?.rawPayload || null,
+            createdAt: r.created_at || existing?.createdAt,
+            updatedAt: r.updated_at || existing?.updatedAt,
+            source: r.source || existing?.source || 'Website A',
+            signatureVerified: existing?.signatureVerified ?? true
           });
         });
       }
@@ -788,13 +1048,7 @@ app.get('/api/orders', async (_req: Request, res: Response) => {
     }
   }
 
-  // 2. Active in-memory store orders always override with latest state and stay fresh
-  activeOrdersStore.forEach((o) => orderMap.set(o.id, o));
-
-  const allOrders = Array.from(orderMap.values()).sort((a, b) => {
-    return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-  });
-
+  const allOrders = Array.from(orderMap.values());
   return res.json({
     success: true,
     count: allOrders.length,
@@ -856,8 +1110,109 @@ app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => 
   }
 });
 
-// Webhook endpoint: Delegated to handleReceiveOrder
-app.post('/api/webhook/website-a', handleReceiveOrder);
+// Webhook endpoint: Receives secure inbound payloads from Website A
+app.post('/api/webhook/website-a', (req: Request, res: Response) => {
+  const { payload, signature, source } = req.body;
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+  if (!payload) {
+    return res.status(400).json({ error: 'Payload missing' });
+  }
+
+  const decryptResult = decryptSecurePayload(payload, PRIVATE_DECRYPTION_KEY);
+  if (!decryptResult.success) {
+    return res.status(401).json({ error: 'Decryption failed: Unauthorized or corrupted key' });
+  }
+
+  const orderData = decryptResult.data;
+  const orderId = (orderData.id && String(orderData.id).startsWith('CTC-2026-')) 
+    ? orderData.id 
+    : `CTC-2026-${Math.floor(2012 + (systemAuditTrail.length || 0))}`;
+
+  const auditEntry = {
+    id: `log-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    orderId,
+    type: 'webhook_received',
+    message: `Inbound webhook received from Website A (${clientIp}). Payload auto-decrypted.`,
+    status: 'success'
+  };
+  systemAuditTrail.unshift(auditEntry);
+
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
+  const clientName = orderData.clientName || orderData.party1?.fullName || orderData.party2?.fullName || 'Client';
+  const formName = orderData.formName || orderData.documentTitle || 'Legal Service';
+
+  // Send notification
+  const notification = {
+    id: `tg-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    orderId,
+    clientName,
+    serviceName: formName,
+    category: orderData.category || 'legal',
+    channel: tgChatId,
+    status: botToken ? 'Delivered' : 'Simulated',
+    messageText: `⚡ *INBOUND ORDER RECEIVED FROM WEBSITE A*\n• ID: ${orderId}\n• Client: ${clientName}\n• Service: ${formName}\n• Duty: ₹${orderData.stampDutyValue || orderData.stampDutyAmount || 500}/-\n• Decrypted via Shared Master Key`
+  };
+  notificationsLog.unshift(notification);
+
+  // Dispatch live Telegram bot HTTP message if configured
+  if (botToken) {
+    try {
+      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text: notification.messageText,
+          parse_mode: 'Markdown'
+        })
+      }).catch(() => {});
+    } catch {}
+  }
+
+  // Sync to Supabase if configured in server environment
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY;
+  if (supabaseUrl && supabaseKey) {
+    try {
+      const cleanUrl = supabaseUrl.replace(/\/+$/, '');
+      fetch(`${cleanUrl}/rest/v1/orders`, {
+        method: 'POST',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates'
+        },
+        body: JSON.stringify({
+          id: orderId,
+          reference_code: orderData.referenceCode || `WA-REF-${Date.now()}`,
+          client_name: clientName,
+          client_phone: orderData.clientPhone || '',
+          form_name: formName,
+          category: orderData.category || 'legal',
+          stamp_duty_value: orderData.stampDutyValue || 500,
+          status: 'decrypted',
+          legal_data: orderData.legalData || null,
+          registration_data: orderData.registrationData || null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          source: 'Website A'
+        })
+      }).catch(() => {});
+    } catch {}
+  }
+
+  res.json({
+    status: 'acknowledged',
+    orderId,
+    receivedAt: new Date().toISOString(),
+    decryptedData: orderData
+  });
+});
 
 // Telegram Notification Stream endpoint
 app.post('/api/notify', async (req: Request, res: Response) => {
@@ -1103,4 +1458,9 @@ async function setupViteOrStatic() {
   });
 }
 
-setupViteOrStatic();
+if (!process.env.VERCEL) {
+  setupViteOrStatic();
+}
+
+export default app;
+
