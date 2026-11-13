@@ -1,8 +1,9 @@
 /**
  * Vercel Serverless Function: /api/orders
  * File: api/orders.js
- * 
- * Fetches and updates orders on Vercel deployment directly from Supabase.
+ *
+ * Fetches orders on Vercel deployment directly from Supabase,
+ * mapping both structured columns and flexible JSONB `payload` / `order_data` / `raw_payload` columns.
  */
 
 export default async function handler(req, res) {
@@ -38,32 +39,69 @@ export default async function handler(req, res) {
           'Authorization': `Bearer ${supabaseKey}`
         }
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        const orders = data.map(r => ({
-          id: r.id,
-          referenceCode: r.reference_code,
-          clientName: r.client_name,
-          clientPhone: r.client_phone,
-          clientEmail: r.client_email,
-          formName: r.form_name,
-          category: r.category,
-          stampDutyValue: r.stamp_duty_value || 0,
-          status: r.status,
-          legalData: r.legal_data,
-          registrationData: r.registration_data,
-          stampData: r.stamp_data,
-          photoUrl: r.photo_url,
-          rawPayload: r.raw_payload,
-          createdAt: r.created_at,
-          updatedAt: r.updated_at,
-          source: r.source
-        }));
-        return res.status(200).json({ success: true, count: orders.length, orders });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error('SUPABASE GET /api/orders ERROR:', errText);
+        return res.status(resp.status).json({ success: false, error: errText, orders: [] });
       }
-      return res.status(200).json({ success: true, count: 0, orders: [] });
+
+      const data = await resp.json();
+      const orders = data.map((r) => {
+        const p = (r.payload && typeof r.payload === 'object' ? r.payload : null) ||
+                  (r.order_data && typeof r.order_data === 'object' ? r.order_data : null) ||
+                  (r.raw_payload && typeof r.raw_payload === 'object' ? r.raw_payload : null) ||
+                  (r.data && typeof r.data === 'object' ? r.data : null) ||
+                  {};
+
+        const resolvedId = r.docket_id || p.id || p.orderId || r.id;
+        const resolvedClientName = r.client_name || r.customer_name || p.clientName || p.party1?.fullName || p.firstParty || 'Client';
+        const resolvedFormName = r.form_name || p.formName || p.documentTitle || p.legalData?.documentTitle || 'Legal Document';
+        const resolvedState = r.state || r.legal_data?.state || p.state || p.legalData?.state || 'Delhi';
+
+        const resolvedLegalData = r.legal_data || p.legalData || (p.party1 || p.party2 || p.clauses ? {
+          documentType: p.formType || p.documentType || 'custom_document',
+          documentTitle: resolvedFormName,
+          stampDutyAmount: Number(r.stamp_duty_value ?? p.stampDutyAmount ?? p.stampDutyValue ?? 500),
+          state: resolvedState,
+          executionDate: p.executionDate || new Date().toISOString().split('T')[0],
+          executionPlace: p.executionPlace || resolvedState,
+          party1: p.party1 || { fullName: resolvedClientName, phone: r.client_phone || p.clientPhone || '', email: r.client_email || p.clientEmail || '', address: '' },
+          party2: p.party2,
+          propertyDetails: p.propertyDetails,
+          clauses: p.clauses
+        } : null);
+
+        return {
+          id: String(resolvedId),
+          referenceCode: r.reference_code || r.docket_id || p.referenceCode || String(resolvedId),
+          clientName: resolvedClientName,
+          clientPhone: r.client_phone || p.clientPhone || p.party1?.phone || '',
+          clientEmail: r.client_email || p.clientEmail || p.party1?.email || '',
+          formType: r.form_type || p.formType || 'custom_document',
+          formName: resolvedFormName,
+          category: r.category || p.category || (r.registration_data || p.registrationData ? 'registration' : 'legal'),
+          state: resolvedState,
+          stampDutyValue: Number(r.stamp_duty_value ?? p.stampDutyValue ?? p.stampDutyAmount ?? 0),
+          status: r.status || p.status || 'received',
+          legalData: resolvedLegalData,
+          registrationData: r.registration_data || p.registrationData || null,
+          stampData: r.stamp_data || p.stampData || null,
+          photoUrl: r.photo_url || p.photoUrl || null,
+          mediaUrls: r.media_urls || p.mediaUrls || [],
+          uploadedFiles: p.uploadedFiles || [],
+          rawPayload: Object.keys(p).length > 0 ? p : r,
+          createdAt: r.created_at || p.createdAt || new Date().toISOString(),
+          updatedAt: r.updated_at || r.created_at || new Date().toISOString(),
+          source: r.source || p.source || 'Website A',
+          signatureVerified: Boolean(p.hmacVerified ?? true)
+        };
+      });
+
+      return res.status(200).json({ success: true, count: orders.length, orders });
     } catch (err) {
-      return res.status(200).json({ success: true, count: 0, orders: [] });
+      console.error('GET /api/orders EXCEPTION:', err);
+      return res.status(500).json({ success: false, error: err.message, orders: [] });
     }
   }
 

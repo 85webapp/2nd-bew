@@ -76,6 +76,8 @@ export async function syncOrderToSupabase(order: Order, customConfig?: SupabaseC
   const cleanUrl = config.url.replace(/\/+$/, '');
   let rowPayload: Record<string, any> = {
     id: order.id,
+    docket_id: order.referenceCode || order.id,
+    customer_name: order.clientName,
     reference_code: order.referenceCode,
     client_name: order.clientName,
     client_phone: order.clientPhone,
@@ -83,12 +85,15 @@ export async function syncOrderToSupabase(order: Order, customConfig?: SupabaseC
     form_type: order.formType || 'custom_document',
     form_name: order.formName,
     category: order.category,
+    state: order.state || 'Delhi',
     stamp_duty_value: order.stampDutyValue,
     status: order.status,
     legal_data: order.legalData || null,
     registration_data: order.registrationData || null,
     stamp_data: order.stampData || null,
-    raw_payload: order.rawPayload || null,
+    raw_payload: order.rawPayload || order,
+    payload: order.rawPayload || order,
+    order_data: order.rawPayload || order,
     photo_url: order.photoUrl || null,
     media_urls: order.mediaUrls || [],
     created_at: order.createdAt,
@@ -96,30 +101,47 @@ export async function syncOrderToSupabase(order: Order, customConfig?: SupabaseC
     source: order.source
   };
 
-  for (let attempt = 0; attempt < 8; attempt++) {
+  let conflictTarget: string | null = 'id';
+
+  for (let attempt = 0; attempt < 15; attempt++) {
     try {
-      const res = await fetch(`${cleanUrl}/rest/v1/orders?on_conflict=id`, {
+      const currentTarget: string | null = conflictTarget;
+      const endpoint: string = currentTarget
+        ? `${cleanUrl}/rest/v1/orders?on_conflict=${encodeURIComponent(currentTarget)}`
+        : `${cleanUrl}/rest/v1/orders`;
+
+      const res: Response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'apikey': config.anonKey,
           'Authorization': `Bearer ${config.anonKey}`,
           'Content-Type': 'application/json',
-          'Prefer': 'resolution=merge-duplicates,return=representation'
+          'Prefer': currentTarget ? 'resolution=merge-duplicates,return=representation' : 'return=representation'
         },
         body: JSON.stringify(rowPayload)
       });
 
       if (res.ok) return true;
 
-      const errText = await res.text();
-      const colMatch = errText.match(/Could not find the '([^']+)' column/i) ||
-                       errText.match(/column "([^"]+)" of relation "orders" does not exist/i);
+      const errText: string = await res.text();
+      const colMatch: RegExpMatchArray | null =
+        errText.match(/Could not find the '([^']+)' column/i) ||
+        errText.match(/column "([^"]+)" of relation "orders" does not exist/i);
       if (colMatch && colMatch[1] && colMatch[1] in rowPayload) {
         const nextPayload = { ...rowPayload };
         delete nextPayload[colMatch[1]];
+        if (colMatch[1] === conflictTarget) conflictTarget = null;
         rowPayload = nextPayload;
         continue;
       }
+      if (/invalid input syntax/i.test(errText) && 'id' in rowPayload) {
+        const nextPayload = { ...rowPayload };
+        delete nextPayload.id;
+        conflictTarget = null;
+        rowPayload = nextPayload;
+        continue;
+      }
+      console.error('Supabase sync error:', errText);
       return false;
     } catch (err) {
       console.warn('Supabase sync skipped / failed:', err);
@@ -149,30 +171,43 @@ export async function fetchOrdersFromSupabase(customConfig?: SupabaseConfig): Pr
 
     if (!res.ok) return [];
     const rows = await res.json();
-    return rows.map((r: any) => ({
-      id: r.id,
-      referenceCode: r.reference_code || r.id,
-      category: r.category || 'legal',
-      formType: r.form_type || r.raw_payload?.formType || 'custom_document',
-      formName: r.form_name || 'Legal Document',
-      clientName: r.client_name || 'Client',
-      clientPhone: r.client_phone || '',
-      clientEmail: r.client_email || r.raw_payload?.clientEmail || '',
-      state: r.state || r.legal_data?.state || r.raw_payload?.state || 'Delhi',
-      stampDutyValue: r.stamp_duty_value ?? 0,
-      createdAt: r.created_at || new Date().toISOString(),
-      updatedAt: r.updated_at || new Date().toISOString(),
-      status: r.status || 'pending',
-      legalData: r.legal_data,
-      registrationData: r.registration_data,
-      stampData: r.stamp_data,
-      photoUrl: r.photo_url || null,
-      mediaUrls: r.media_urls || [],
-      uploadedFiles: r.raw_payload?.uploadedFiles || [],
-      rawPayload: r.raw_payload || null,
-      source: r.source || 'Website A',
-      signatureVerified: true
-    }));
+    return rows.map((r: any) => {
+      const p = (r.payload && typeof r.payload === 'object' ? r.payload : null) ||
+                (r.order_data && typeof r.order_data === 'object' ? r.order_data : null) ||
+                (r.raw_payload && typeof r.raw_payload === 'object' ? r.raw_payload : null) ||
+                (r.data && typeof r.data === 'object' ? r.data : null) ||
+                {};
+
+      const resolvedId = r.docket_id || p.id || p.orderId || r.id;
+      const resolvedClientName = r.client_name || r.customer_name || p.clientName || p.party1?.fullName || p.firstParty || 'Client';
+      const resolvedFormName = r.form_name || p.formName || p.documentTitle || p.legalData?.documentTitle || 'Legal Document';
+      const resolvedState = r.state || r.legal_data?.state || p.state || p.legalData?.state || 'Delhi';
+
+      return {
+        id: String(resolvedId),
+        referenceCode: r.reference_code || r.docket_id || p.referenceCode || String(resolvedId),
+        category: r.category || p.category || (r.registration_data || p.registrationData ? 'registration' : 'legal'),
+        formType: r.form_type || p.formType || 'custom_document',
+        formName: resolvedFormName,
+        clientName: resolvedClientName,
+        clientPhone: r.client_phone || p.clientPhone || p.party1?.phone || '',
+        clientEmail: r.client_email || p.clientEmail || p.party1?.email || '',
+        state: resolvedState,
+        stampDutyValue: Number(r.stamp_duty_value ?? p.stampDutyValue ?? p.stampDutyAmount ?? 0),
+        createdAt: r.created_at || p.createdAt || new Date().toISOString(),
+        updatedAt: r.updated_at || r.created_at || new Date().toISOString(),
+        status: r.status || p.status || 'received',
+        legalData: r.legal_data || p.legalData,
+        registrationData: r.registration_data || p.registrationData,
+        stampData: r.stamp_data || p.stampData,
+        photoUrl: r.photo_url || p.photoUrl || null,
+        mediaUrls: r.media_urls || p.mediaUrls || [],
+        uploadedFiles: p.uploadedFiles || [],
+        rawPayload: Object.keys(p).length > 0 ? p : r,
+        source: r.source || p.source || 'Website A',
+        signatureVerified: Boolean(p.hmacVerified ?? true)
+      };
+    });
   } catch (err) {
     console.error('Failed to load from Supabase', err);
     return [];

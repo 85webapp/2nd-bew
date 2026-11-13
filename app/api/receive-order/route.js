@@ -1,33 +1,74 @@
 /**
  * Vercel Serverless Next.js API Route: /api/receive-order
  * File: app/api/receive-order/route.js
- * 
- * Secure Inbound Receiver for Website A -> Website B (Vercel Serverless Architecture)
- * 1. HMAC Secret / Key verification using WEBSITE_SECRET_KEY (or SUBMISSION_HMAC_SECRET)
- * 2. Decryption using PRIVATE_KEY (RSA Private Key PEM or AES-256 Passphrase)
- * 3. File & Media handling (Cloudinary image upload for attached photos/documents)
- * 4. STRICT STORAGE DISCIPLINE: Raw Data ONLY saved permanently in Supabase.
- *    PDFs are NEVER saved on server storage or Cloudinary to prevent storage bloat.
- * 5. Instant Telegram notification to Admin: "नया ऑर्डर आ चुका है!"
- * 6. Zero hard-coded values; all credentials from process.env.
  */
 
 import crypto from 'crypto';
 
-// Helper to derive 32-byte key from passphrase for AES-256
-function derive32ByteKey(passphrase) {
-  return crypto.createHash('sha256').update(passphrase).digest();
+function deriveCandidate32ByteKeys(passphrase) {
+  const trimmed = String(passphrase).trim();
+  const keys = [crypto.createHash('sha256').update(trimmed, 'utf8').digest()];
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+    keys.push(Buffer.from(trimmed, 'hex'));
+  }
+  const utf8Buf = Buffer.from(trimmed, 'utf8');
+  if (utf8Buf.length === 32) {
+    keys.push(utf8Buf);
+  }
+  try {
+    const b64Buf = Buffer.from(trimmed, 'base64');
+    if (b64Buf.length === 32) keys.push(b64Buf);
+  } catch {}
+  return keys;
 }
 
-// Universal Decryptor: Decrypts both RSA Private Key & AES-256 payloads
+function decodeBufferAuto(str) {
+  const clean = String(str).trim();
+  if (/^[0-9a-fA-F]+$/.test(clean) && clean.length % 2 === 0) {
+    return Buffer.from(clean, 'hex');
+  }
+  return Buffer.from(clean, 'base64');
+}
+
+function tryAesPartsDecrypt(ivBuf, cipherBuf, tagBuf, keys) {
+  for (const key of keys) {
+    if (tagBuf) {
+      try {
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, ivBuf);
+        decipher.setAuthTag(tagBuf);
+        const out = Buffer.concat([decipher.update(cipherBuf), decipher.final()]).toString('utf8');
+        return JSON.parse(out);
+      } catch {}
+    } else {
+      if (cipherBuf.length > 16) {
+        try {
+          const ct = cipherBuf.subarray(0, cipherBuf.length - 16);
+          const tag = cipherBuf.subarray(cipherBuf.length - 16);
+          const decipher = crypto.createDecipheriv('aes-256-gcm', key, ivBuf);
+          decipher.setAuthTag(tag);
+          const out = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+          return JSON.parse(out);
+        } catch {}
+      }
+      if (ivBuf.length >= 16) {
+        try {
+          const decipherCbc = crypto.createDecipheriv('aes-256-cbc', key, ivBuf.subarray(0, 16));
+          const out = Buffer.concat([decipherCbc.update(cipherBuf), decipherCbc.final()]).toString('utf8');
+          return JSON.parse(out);
+        } catch {}
+      }
+    }
+  }
+  return null;
+}
+
 function decryptPayload(encryptedInput, privateKeyOrPass) {
-  if (!privateKeyOrPass || !privateKeyOrPass.trim()) {
-    throw new Error('Server configuration error: PRIVATE_KEY is not defined in environment variables.');
+  if (!privateKeyOrPass || !String(privateKeyOrPass).trim()) {
+    throw new Error('Server configuration error: PRIVATE_KEY is missing.');
   }
 
   const trimmed = typeof encryptedInput === 'string' ? encryptedInput.trim() : JSON.stringify(encryptedInput);
 
-  // 1. Check if input is a Hybrid Envelope object
   let envelope = null;
   if (typeof encryptedInput === 'object' && encryptedInput !== null) {
     if (encryptedInput.encKey || encryptedInput.key) envelope = encryptedInput;
@@ -38,7 +79,6 @@ function decryptPayload(encryptedInput, privateKeyOrPass) {
     } catch {}
   }
 
-  // Handle RSA Hybrid Envelope
   if (envelope) {
     const encKeyBuf = Buffer.from(envelope.encKey || envelope.key, 'base64');
     let aesKey;
@@ -54,25 +94,22 @@ function decryptPayload(encryptedInput, privateKeyOrPass) {
       );
     }
 
-    const iv = Buffer.from(envelope.iv, (envelope.iv?.length === 24 || envelope.iv?.length === 32) ? 'hex' : 'base64');
-    const cipherText = envelope.cipher || envelope.ciphertext || envelope.data;
-    const tag = envelope.tag ? Buffer.from(envelope.tag, envelope.tag?.length === 32 ? 'hex' : 'base64') : null;
+    const iv = decodeBufferAuto(envelope.iv);
+    const cipherBuf = decodeBufferAuto(envelope.cipher || envelope.ciphertext || envelope.encryptedData || envelope.data);
+    const tagRaw = envelope.tag || envelope.authTag;
+    const tag = tagRaw ? decodeBufferAuto(tagRaw) : null;
 
     if (tag) {
       const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, iv);
       decipher.setAuthTag(tag);
-      let decrypted = decipher.update(cipherText, (cipherText.length % 2 === 0 && !cipherText.includes('+')) ? 'hex' : 'base64', 'utf8');
-      decrypted += decipher.final('utf8');
-      return JSON.parse(decrypted);
-    } else {
-      const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv.subarray(0, 16));
-      let decrypted = decipher.update(cipherText, (cipherText.length % 2 === 0 && !cipherText.includes('+')) ? 'hex' : 'base64', 'utf8');
-      decrypted += decipher.final('utf8');
+      const decrypted = Buffer.concat([decipher.update(cipherBuf), decipher.final()]).toString('utf8');
       return JSON.parse(decrypted);
     }
+    const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv.subarray(0, 16));
+    const decrypted = Buffer.concat([decipher.update(cipherBuf), decipher.final()]).toString('utf8');
+    return JSON.parse(decrypted);
   }
 
-  // 2. Check if key is an RSA Private Key PEM
   const isRsa = privateKeyOrPass.includes('BEGIN RSA PRIVATE KEY') ||
                 privateKeyOrPass.includes('BEGIN PRIVATE KEY') ||
                 privateKeyOrPass.includes('BEGIN ENCRYPTED PRIVATE KEY');
@@ -95,12 +132,24 @@ function decryptPayload(encryptedInput, privateKeyOrPass) {
         );
         return JSON.parse(decrypted.toString('utf8'));
       }
-    } catch {
-      // fallback to AES
+    } catch {}
+  }
+
+  const candidateKeys = deriveCandidate32ByteKeys(privateKeyOrPass);
+
+  if (typeof encryptedInput === 'object' && encryptedInput !== null && encryptedInput.iv) {
+    const cipherVal = encryptedInput.ciphertext || encryptedInput.encryptedData || encryptedInput.cipher || encryptedInput.data;
+    if (cipherVal) {
+      const parsed = tryAesPartsDecrypt(
+        decodeBufferAuto(encryptedInput.iv),
+        decodeBufferAuto(cipherVal),
+        (encryptedInput.authTag || encryptedInput.tag) ? decodeBufferAuto(encryptedInput.authTag || encryptedInput.tag) : null,
+        candidateKeys
+      );
+      if (parsed !== null) return parsed;
     }
   }
 
-  // 3. Symmetric AES-256-GCM / CBC Decryption
   if (trimmed.startsWith('b64:')) {
     const raw = Buffer.from(trimmed.substring(4), 'base64').toString('utf8');
     return JSON.parse(decodeURIComponent(raw));
@@ -108,36 +157,15 @@ function decryptPayload(encryptedInput, privateKeyOrPass) {
 
   if (trimmed.includes(':')) {
     const parts = trimmed.split(':');
-    const key = derive32ByteKey(privateKeyOrPass);
-
     if (parts.length === 3) {
-      const iv = Buffer.from(parts[0], 'hex');
-      const cipherHex = parts[1];
-      const authTag = Buffer.from(parts[2], 'hex');
-
-      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-      decipher.setAuthTag(authTag);
-      let decrypted = decipher.update(cipherHex, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      return JSON.parse(decrypted);
+      const parsed = tryAesPartsDecrypt(decodeBufferAuto(parts[0]), decodeBufferAuto(parts[1]), decodeBufferAuto(parts[2]), candidateKeys);
+      if (parsed !== null) return parsed;
     } else if (parts.length === 2) {
-      const iv = Buffer.from(parts[0], 'hex');
-      const cipherHex = parts[1];
-      try {
-        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-        let decrypted = decipher.update(cipherHex, 'hex', 'utf8');
-        decrypted += decipher.final('utf8');
-        return JSON.parse(decrypted);
-      } catch {
-        const decipherCbc = crypto.createDecipheriv('aes-256-cbc', key, iv.subarray(0, 16));
-        let decrypted = decipherCbc.update(cipherHex, 'hex', 'utf8');
-        decrypted += decipherCbc.final('utf8');
-        return JSON.parse(decrypted);
-      }
+      const parsed = tryAesPartsDecrypt(decodeBufferAuto(parts[0]), decodeBufferAuto(parts[1]), null, candidateKeys);
+      if (parsed !== null) return parsed;
     }
   }
 
-  // Try raw base64 or JSON
   try {
     const decoded = Buffer.from(trimmed, 'base64').toString('utf8');
     if (decoded.startsWith('{') || decoded.startsWith('[')) {
@@ -152,41 +180,82 @@ function decryptPayload(encryptedInput, privateKeyOrPass) {
   throw new Error('Unrecognized encrypted payload format.');
 }
 
-// Media upload to Cloudinary (for applicant photos/attachments)
-async function uploadMedia(mediaData, publicIdPrefix) {
-  if (!mediaData || typeof mediaData !== 'string') return null;
-  if (mediaData.startsWith('http://') || mediaData.startsWith('https://')) return mediaData;
+async function getOrdersTableColumns(cleanUrl, supabaseKey) {
+  try {
+    const res = await fetch(`${cleanUrl}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Accept': 'application/openapi+json'
+      }
+    });
+    if (!res.ok) return null;
+    const spec = await res.json();
+    const props = spec?.definitions?.orders?.properties || spec?.components?.schemas?.orders?.properties;
+    if (props && typeof props === 'object') return new Set(Object.keys(props));
+  } catch {}
+  return null;
+}
 
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+async function insertIntoSupabaseOrders(cleanUrl, supabaseKey, fullFieldMap, fallbackFlexibleMap) {
+  const existingCols = await getOrdersTableColumns(cleanUrl, supabaseKey);
+  let recordToInsert;
+  let conflictTarget = null;
 
-  if (cloudName && apiKey && apiSecret) {
-    try {
-      const timestamp = Math.round(Date.now() / 1000);
-      const publicId = `${publicIdPrefix}_${timestamp}`;
-      const paramsToSign = `public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
-      const signature = crypto.createHash('sha1').update(paramsToSign).digest('hex');
-
-      const formData = new FormData();
-      formData.append('file', mediaData);
-      formData.append('api_key', apiKey);
-      formData.append('timestamp', String(timestamp));
-      formData.append('public_id', publicId);
-      formData.append('signature', signature);
-
-      const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
-      if (data.secure_url || data.url) return data.secure_url || data.url;
-    } catch (err) {
-      console.warn('Cloudinary upload warning:', err);
+  if (existingCols && existingCols.size > 0) {
+    recordToInsert = {};
+    for (const [col, val] of Object.entries(fullFieldMap)) {
+      if (existingCols.has(col) && val !== undefined) recordToInsert[col] = val;
     }
+    const fullPayloadObj = fullFieldMap.payload || fullFieldMap.raw_payload;
+    for (const jsonCol of ['payload', 'order_data', 'raw_payload', 'data']) {
+      if (existingCols.has(jsonCol) && !recordToInsert[jsonCol]) recordToInsert[jsonCol] = fullPayloadObj;
+    }
+    if (existingCols.has('id') && recordToInsert.id) conflictTarget = 'id';
+  } else {
+    recordToInsert = { ...fallbackFlexibleMap };
   }
 
-  return mediaData; // return base64 inline if Cloudinary not configured
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const endpoint = conflictTarget
+      ? `${cleanUrl}/rest/v1/orders?on_conflict=${encodeURIComponent(conflictTarget)}`
+      : `${cleanUrl}/rest/v1/orders`;
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Content-Type': 'application/json',
+        'Prefer': conflictTarget ? 'resolution=merge-duplicates,return=representation' : 'return=representation'
+      },
+      body: JSON.stringify(recordToInsert)
+    });
+
+    if (resp.ok) {
+      return { ok: true, data: await resp.json().catch(() => null) };
+    }
+
+    const rawText = await resp.text();
+    let parsedErr;
+    try { parsedErr = JSON.parse(rawText); } catch { parsedErr = { message: rawText, status: resp.status }; }
+    const msg = parsedErr?.message || rawText;
+    const colMatch = msg.match(/Could not find the '([^']+)' column/i) ||
+                     msg.match(/column "([^"]+)" of relation "orders" does not exist/i);
+    if (colMatch && colMatch[1] && colMatch[1] in recordToInsert) {
+      delete recordToInsert[colMatch[1]];
+      if (colMatch[1] === conflictTarget) conflictTarget = null;
+      if (Object.keys(recordToInsert).length === 0) return { ok: false, error: parsedErr };
+      continue;
+    }
+    if ((parsedErr?.code === '22P02' || /invalid input syntax/i.test(msg)) && 'id' in recordToInsert) {
+      delete recordToInsert.id;
+      conflictTarget = null;
+      continue;
+    }
+    return { ok: false, error: parsedErr };
+  }
+  return { ok: false, error: { message: 'Supabase insert failed after retries' } };
 }
 
 export async function OPTIONS() {
@@ -208,53 +277,16 @@ export async function GET() {
     message: 'Website B Inbound Order Receiver is active and ready for POST requests.'
   }), {
     status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*'
-    }
+    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
   });
 }
 
 export async function POST(request) {
   try {
-    // 1. Validate Security: HMAC Secret / Key from Header (NON-BLOCKING)
-    const websiteSecret = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET;
-    const incomingHmac = request.headers.get('x-hmac-secret') ||
-                         request.headers.get('x-submission-signature') ||
-                         request.headers.get('x-hmac-signature') ||
-                         request.headers.get('website_secret_key') ||
-                         request.headers.get('authorization');
-
-    let hmacVerified = false;
-    if (websiteSecret && incomingHmac) {
-      const rawHeader = incomingHmac.replace(/^Bearer\s+/i, '').trim();
-      if (rawHeader === websiteSecret) {
-        hmacVerified = true;
-      } else {
-        try {
-          const bodyClone = await request.clone().text();
-          const computedSig = crypto.createHmac('sha256', websiteSecret).update(bodyClone).digest('hex');
-          const compBuf = Buffer.from(computedSig, 'utf8');
-          const inBuf = Buffer.from(rawHeader, 'utf8');
-          if (inBuf.length === compBuf.length && crypto.timingSafeEqual(inBuf, compBuf)) {
-            hmacVerified = true;
-          }
-        } catch {}
-      }
-    } else if (!websiteSecret) {
-      hmacVerified = true;
-    }
-
-    // 2. Parse Body & Payload
     let body = {};
-    try {
-      body = await request.json();
-    } catch {
-      body = {};
-    }
+    try { body = await request.json(); } catch { body = {}; }
     const payload = body.payload !== undefined ? body.payload : body;
 
-    // 3. Decrypt with candidate keys or plain object
     const candidateKeys = [
       request.headers.get('x-private-key'),
       request.headers.get('x-master-key'),
@@ -266,142 +298,113 @@ export async function POST(request) {
       process.env.MASTER_KEY
     ].filter(Boolean);
 
-    let orderData = null;
-    let isDecrypted = false;
-
-    if (typeof payload === 'object' && payload !== null && !payload.cipher && !payload.ciphertext && !payload.encKey) {
-      orderData = payload;
-      isDecrypted = true;
+    let decryptedData = null;
+    if (typeof payload === 'object' && payload !== null && !payload.cipher && !payload.ciphertext && !payload.encryptedData && !payload.encKey) {
+      decryptedData = payload;
     }
-
-    if (!orderData) {
+    if (!decryptedData) {
       for (const k of candidateKeys) {
         try {
-          orderData = decryptPayload(payload, k);
-          if (orderData && typeof orderData === 'object') {
-            isDecrypted = true;
-            break;
-          }
+          const out = decryptPayload(payload, k);
+          if (out && typeof out === 'object') { decryptedData = out; break; }
         } catch {}
       }
     }
-
-    if (!orderData || typeof orderData !== 'object') {
-      orderData = (typeof payload === 'object' && payload !== null) ? payload : {};
-      isDecrypted = false;
+    if (!decryptedData || typeof decryptedData !== 'object') {
+      decryptedData = (typeof payload === 'object' && payload !== null) ? payload : { rawInput: payload };
     }
 
-    // Assign sequential Order ID
-    const orderId = (orderData.id && String(orderData.id).startsWith('CTC-2026-'))
-      ? orderData.id
-      : `CTC-2026-${Math.floor(2020 + Math.random() * 8000)}`;
+    console.log('--- RECEIVED & DECRYPTED PAYLOAD ---', decryptedData);
 
-    const clientName = orderData.clientName || orderData.party1?.fullName || 'Client';
-    const formName = orderData.formName || orderData.documentTitle || 'Legal Service';
-    const clientPhone = orderData.clientPhone || orderData.party1?.phone || 'Not Provided';
-    const duty = Number(orderData.stampDutyValue || orderData.stampDutyAmount || 500);
+    const orderId = (decryptedData.orderId || decryptedData.id || decryptedData.docketId || '').toString().trim() ||
+      `CTC-2026-${Math.floor(2020 + Math.random() * 8000)}`;
+    const docketId = decryptedData.docketId || decryptedData.docket_id || decryptedData.id || orderId;
+    const clientName = decryptedData.clientName || decryptedData.party1?.fullName || decryptedData.firstParty || 'N/A';
+    const formName = decryptedData.formName || decryptedData.documentTitle || 'Legal Service';
+    const clientPhone = decryptedData.clientPhone || decryptedData.party1?.phone || 'Not Provided';
+    const duty = Number(decryptedData.stampDutyValue ?? decryptedData.stampDutyAmount ?? 500);
+    const nowIso = new Date().toISOString();
 
-    // 4. Media & Photo Handling (Cloudinary upload if photos present)
-    let photoUrl = null;
-    if (orderData.photo || orderData.applicantPhoto || orderData.party1?.photo) {
-      photoUrl = await uploadMedia(
-        orderData.photo || orderData.applicantPhoto || orderData.party1?.photo,
-        `ctc_photo_${orderId}`
-      );
-    }
-
-    // 5. Build Complete Raw Data Record (NEVER STORE PDF!)
-    const rawOrderRecord = {
+    const fullFieldMap = {
       id: orderId,
-      reference_code: orderData.referenceCode || `WA-RECV-${Date.now()}`,
+      docket_id: docketId,
+      customer_name: clientName,
+      reference_code: decryptedData.referenceCode || `WA-RECV-${Date.now()}`,
       client_name: clientName,
       client_phone: clientPhone,
-      client_email: orderData.clientEmail || '',
+      client_email: decryptedData.clientEmail || '',
       form_name: formName,
-      category: orderData.category || 'legal',
+      category: decryptedData.category || 'legal',
       stamp_duty_value: duty,
       status: 'received',
-      photo_url: photoUrl,
-      legal_data: orderData.legalData || {
-        documentTitle: formName,
-        party1: orderData.party1,
-        party2: orderData.party2,
-        clauses: orderData.clauses,
-        propertyDetails: orderData.propertyDetails,
-        state: orderData.state
-      },
-      registration_data: orderData.registrationData || null,
-      raw_payload: orderData, // Raw decrypted JSON permanently stored!
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      legal_data: decryptedData.legalData || { documentTitle: formName, party1: decryptedData.party1, party2: decryptedData.party2, clauses: decryptedData.clauses, propertyDetails: decryptedData.propertyDetails, state: decryptedData.state },
+      registration_data: decryptedData.registrationData || null,
+      raw_payload: decryptedData,
+      payload: decryptedData,
+      order_data: decryptedData,
+      created_at: decryptedData.createdAt || nowIso,
+      updated_at: nowIso,
       source: body.source || 'Website A'
     };
 
-    // 6. Save Permanently in Supabase (Raw Data only, No PDF storage!)
-    const supabaseUrl = process.env.SUPABASE_URL || process.env.SUPABASE_CONNECTION_STRING;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.SUPABASE_CONNECTION_STRING || '';
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+    let cleanUrl = supabaseUrl.trim();
+    if (cleanUrl && cleanUrl.includes('supabase.co') && !cleanUrl.startsWith('http')) {
+      const match = cleanUrl.match(/db\.([a-z0-9-]+)\.supabase\.co/i);
+      cleanUrl = match ? `https://${match[1]}.supabase.co` : cleanUrl;
+    }
+    if (cleanUrl) cleanUrl = cleanUrl.replace(/\/+$/, '');
 
-    if (supabaseUrl && supabaseKey) {
-      try {
-        let cleanUrl = supabaseUrl;
-        if (cleanUrl.includes('supabase.co') && !cleanUrl.startsWith('http')) {
-          const match = cleanUrl.match(/db\.([a-z0-9-]+)\.supabase\.co/i);
-          cleanUrl = match ? `https://${match[1]}.supabase.co` : cleanUrl;
-        }
-        cleanUrl = cleanUrl.replace(/\/+$/, '');
-
-        await fetch(`${cleanUrl}/rest/v1/orders`, {
-          method: 'POST',
-          headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'resolution=merge-duplicates'
-          },
-          body: JSON.stringify(rawOrderRecord)
-        });
-      } catch (dbErr) {
-        console.warn('Supabase save error:', dbErr);
-      }
+    if (!cleanUrl || !supabaseKey) {
+      const configErr = { message: 'Supabase credentials missing in environment variables' };
+      console.error('SUPABASE INSERT CRITICAL ERROR:', configErr);
+      return new Response(JSON.stringify({ success: false, error: configErr.message, fullError: configErr }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+      });
     }
 
-    // 7. Instant Telegram Notification
+    const dbResult = await insertIntoSupabaseOrders(cleanUrl, supabaseKey, fullFieldMap, fullFieldMap);
+    if (!dbResult.ok) {
+      console.error('SUPABASE INSERT CRITICAL ERROR:', dbResult.error);
+      return new Response(JSON.stringify({ success: false, error: dbResult.error?.message || 'Supabase insert failed', fullError: dbResult.error }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+      });
+    }
+
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
     if (botToken) {
-      const msg = `🔔 *नया ऑर्डर आ चुका है!*\n\n• *ऑर्डर आईडी:* \`${orderId}\`\n• *क्लाइंट का नाम:* *${clientName}*\n• *सेवा / फॉर्म:* ${formName}\n• *मोबाइल नंबर:* ${clientPhone}\n• *स्टाम्प ड्यूटी:* ₹${duty}/-\n• *स्रोत:* वेबसाइट A\n\n_✓ रॉ डेटा डेटाबेस में सुरक्षित रूप से सेव हो चुका है_`;
-      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: tgChatId,
-          text: msg,
-          parse_mode: 'Markdown'
-        })
-      }).catch(() => {});
+      try {
+        const msg = `🔔 *नया ऑर्डर आ चुका है!*\n\n• *ऑर्डर आईडी:* \`${orderId}\`\n• *क्लाइंट का नाम:* *${clientName}*\n• *सेवा / फॉर्म:* ${formName}\n• *मोबाइल नंबर:* ${clientPhone}\n• *स्टाम्प ड्यूटी:* ₹${duty}/-\n\n_✓ डेटा Supabase डेटाबेस में सेव हो चुका है_`;
+        const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: tgChatId, text: msg, parse_mode: 'Markdown' })
+        });
+        if (!tgRes.ok) console.error('TELEGRAM API ERROR:', await tgRes.text());
+      } catch (tgErr) {
+        console.error('TELEGRAM NOTIFICATION ERROR:', tgErr);
+      }
     }
 
-    // Return success with raw decrypted data (No PDF stored)
     return new Response(JSON.stringify({
       success: true,
       status: 'PROCESSED_AND_STORED',
       orderId,
       clientName,
       formName,
-      photoUrl,
-      rawPayloadSaved: true,
-      pdfStored: false,
-      message: 'Raw order data securely decrypted and stored permanently.'
+      supabaseSaved: true,
+      rawPayloadSaved: true
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
-
   } catch (err) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: 'Decryption or processing failed: ' + err.message
-    }), {
+    console.error('API Error in /app/api/receive-order:', err);
+    return new Response(JSON.stringify({ success: false, error: err.message, fullError: err }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });

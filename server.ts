@@ -42,10 +42,11 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // NO HARD-CODING: Keys and secrets strictly loaded from environment variables
-const PRIVATE_DECRYPTION_KEY = process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || process.env.ENCRYPTION_KEY || '';
+const PRIVATE_DECRYPTION_KEY = process.env.PRIVATE_KEY || process.env.PRIVATE_DECRYPTION_KEY || process.env.MASTER_ENCRYPTION_KEY || process.env.MASTER_KEY || process.env.ENCRYPTION_KEY || '';
 const MASTER_ENCRYPTION_KEY = PRIVATE_DECRYPTION_KEY;
 const MASTER_KEY = PRIVATE_DECRYPTION_KEY;
-const SUBMISSION_HMAC_SECRET = process.env.SUBMISSION_HMAC_SECRET || process.env.HMAC_SECRET || process.env.WEBHOOK_SECRET || '';
+const SUBMISSION_HMAC_SECRET = process.env.WEBSITE_SECRET_KEY || process.env.SUBMISSION_HMAC_SECRET || process.env.HMAC_SECRET || process.env.WEBHOOK_SECRET || '';
+let runtimeSyncedKey = '';
 
 app.use(express.json({
   limit: '50mb',
@@ -299,6 +300,8 @@ function decryptAES256(encryptedInput: any, keyString: string = MASTER_KEY): { s
 function decryptSecurePayload(encryptedInput: any, explicitKey?: string): { success: boolean; data?: any; error?: string } {
   const keysToTry = Array.from(new Set([
     explicitKey,
+    runtimeSyncedKey,
+    process.env.PRIVATE_KEY,
     process.env.PRIVATE_DECRYPTION_KEY,
     process.env.MASTER_ENCRYPTION_KEY,
     process.env.MASTER_KEY,
@@ -396,8 +399,74 @@ function resolveSupabaseUrl(): string | null {
 const activeOrdersStore: any[] = [];
 const notificationsLog: any[] = [];
 const systemAuditTrail: any[] = [];
+const sseClients = new Set<Response>();
+
+function broadcastNewOrderSSE(order: any) {
+  const payload = `data: ${JSON.stringify({ type: 'NEW_ORDER', order })}\n\n`;
+  sseClients.forEach((client) => {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  });
+}
 
 // ======================== API ROUTES ======================== //
+
+// Sync runtime decryption key from admin UI if provided
+app.post('/api/config/key', (req: Request, res: Response) => {
+  const { key } = req.body || {};
+  if (typeof key === 'string' && key.trim()) {
+    runtimeSyncedKey = key.trim();
+  }
+  res.json({ success: true });
+});
+
+// Server-Sent Events (SSE) stream for real-time order updates in Admin Panel
+app.get('/api/orders/stream', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  res.write(`data: ${JSON.stringify({ type: 'CONNECTED' })}\n\n`);
+  sseClients.add(res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': heartbeat\n\n');
+    } catch {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    }
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
+
+// Dynamic on-demand PDF rendering stream (no server PDF file storage)
+app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {
+  const orderId = String(req.query.orderId || '');
+  const overlay = req.query.overlay === 'true';
+  const order = activeOrdersStore.find((o) => o.id === orderId);
+  if (!order) {
+    return res.status(404).json({ success: false, error: `Order ${orderId} not found for PDF rendering` });
+  }
+  try {
+    const pdfBuffer = await generateLegalAgreementPdf(
+      { ...order, overlayProvision: overlay || Boolean(order.stampData?.verified) },
+      { overlayProvision: overlay || Boolean(order.stampData?.verified), topBlankSpace: 260 }
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Legal_Document_${orderId}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Decrypt endpoint for client verification
 app.post('/api/decrypt', (req: Request, res: Response) => {
@@ -540,16 +609,41 @@ function verifyInboundHmac(req: Request, payload: any): { ok: boolean; hmacVerif
   }
 }
 
-async function saveOrderToSupabase(orderRecord: any): Promise<{ saved: boolean; error?: string }> {
+async function getOrdersTableColumns(resolvedSupabase: string, supabaseKey: string): Promise<Set<string> | null> {
+  try {
+    const res = await fetch(`${resolvedSupabase}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Accept': 'application/openapi+json'
+      }
+    });
+    if (!res.ok) return null;
+    const spec = await res.json();
+    const props = spec?.definitions?.orders?.properties || spec?.components?.schemas?.orders?.properties;
+    if (props && typeof props === 'object') {
+      return new Set(Object.keys(props));
+    }
+  } catch {}
+  return null;
+}
+
+async function saveOrderToSupabase(orderRecord: any): Promise<{ saved: boolean; error?: any }> {
   const resolvedSupabase = resolveSupabaseUrl();
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
   if (!resolvedSupabase || !supabaseKey) {
-    return { saved: false, error: 'Supabase credentials (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_ANON_KEY) not configured' };
+    const msg = 'Supabase credentials (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_ANON_KEY) not configured';
+    console.error('SUPABASE INSERT CRITICAL ERROR:', msg);
+    return { saved: false, error: { message: msg } };
   }
 
-  let rowPayload: Record<string, any> = {
+  const fullPayloadObj = orderRecord.rawPayload || orderRecord;
+  const fullFieldMap: Record<string, any> = {
     id: orderRecord.id,
+    docket_id: orderRecord.rawPayload?.docketId || orderRecord.id,
+    customer_name: orderRecord.clientName,
     reference_code: orderRecord.referenceCode,
     client_name: orderRecord.clientName,
     client_phone: orderRecord.clientPhone,
@@ -557,12 +651,16 @@ async function saveOrderToSupabase(orderRecord: any): Promise<{ saved: boolean; 
     form_type: orderRecord.formType || 'custom_document',
     form_name: orderRecord.formName,
     category: orderRecord.category,
+    state: orderRecord.state || 'Delhi',
     stamp_duty_value: orderRecord.stampDutyValue,
     status: orderRecord.status,
     legal_data: orderRecord.legalData || null,
     registration_data: orderRecord.registrationData || null,
     stamp_data: orderRecord.stampData || null,
-    raw_payload: orderRecord.rawPayload || null,
+    raw_payload: fullPayloadObj,
+    payload: fullPayloadObj,
+    order_data: fullPayloadObj,
+    data: fullPayloadObj,
     photo_url: orderRecord.photoUrl || null,
     media_urls: orderRecord.mediaUrls || [],
     created_at: orderRecord.createdAt,
@@ -570,16 +668,61 @@ async function saveOrderToSupabase(orderRecord: any): Promise<{ saved: boolean; 
     source: orderRecord.source
   };
 
-  // Upsert with automatic PostgREST missing-column retry so partial Supabase schemas never reject the order
-  for (let attempt = 0; attempt < 8; attempt++) {
+  const existingCols = await getOrdersTableColumns(resolvedSupabase, supabaseKey);
+  let rowPayload: Record<string, any>;
+  let conflictTarget: string | null = null;
+
+  if (existingCols && existingCols.size > 0) {
+    rowPayload = {};
+    for (const [col, val] of Object.entries(fullFieldMap)) {
+      if (existingCols.has(col) && val !== undefined) {
+        rowPayload[col] = val;
+      }
+    }
+    for (const jsonCol of ['payload', 'order_data', 'raw_payload', 'data']) {
+      if (existingCols.has(jsonCol) && !rowPayload[jsonCol]) {
+        rowPayload[jsonCol] = fullPayloadObj;
+      }
+    }
+    if (existingCols.has('id') && rowPayload.id) conflictTarget = 'id';
+  } else {
+    rowPayload = {
+      id: orderRecord.id,
+      reference_code: orderRecord.referenceCode,
+      client_name: orderRecord.clientName,
+      client_phone: orderRecord.clientPhone,
+      client_email: orderRecord.clientEmail || '',
+      form_type: orderRecord.formType || 'custom_document',
+      form_name: orderRecord.formName,
+      category: orderRecord.category,
+      stamp_duty_value: orderRecord.stampDutyValue,
+      status: orderRecord.status,
+      legal_data: orderRecord.legalData || null,
+      registration_data: orderRecord.registrationData || null,
+      stamp_data: orderRecord.stampData || null,
+      raw_payload: fullPayloadObj,
+      photo_url: orderRecord.photoUrl || null,
+      media_urls: orderRecord.mediaUrls || [],
+      created_at: orderRecord.createdAt,
+      updated_at: orderRecord.updatedAt,
+      source: orderRecord.source
+    };
+    conflictTarget = 'id';
+  }
+
+  for (let attempt = 0; attempt < 20; attempt++) {
     try {
-      const supaRes = await fetch(`${resolvedSupabase}/rest/v1/orders?on_conflict=id`, {
+      const endpoint = conflictTarget
+        ? `${resolvedSupabase}/rest/v1/orders?on_conflict=${encodeURIComponent(conflictTarget)}`
+        : `${resolvedSupabase}/rest/v1/orders`;
+
+      const supaRes = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
           'Content-Type': 'application/json',
-          'Prefer': 'resolution=merge-duplicates,return=representation'
+          'Prefer': conflictTarget ? 'resolution=merge-duplicates,return=representation' : 'return=representation'
         },
         body: JSON.stringify(rowPayload)
       });
@@ -589,25 +732,44 @@ async function saveOrderToSupabase(orderRecord: any): Promise<{ saved: boolean; 
       }
 
       const errText = await supaRes.text();
-      // Detect PostgREST PGRST204 missing column error: Could not find the '<col>' column of 'orders'
-      const colMatch = errText.match(/Could not find the '([^']+)' column/i) ||
-                       errText.match(/column "([^"]+)" of relation "orders" does not exist/i);
+      let parsedErr: any;
+      try { parsedErr = JSON.parse(errText); } catch { parsedErr = { message: errText, status: supaRes.status }; }
+      const msg = parsedErr?.message || errText;
+
+      const colMatch = msg.match(/Could not find the '([^']+)' column/i) ||
+                       msg.match(/column "([^"]+)" of relation "orders" does not exist/i);
       if (colMatch && colMatch[1] && colMatch[1] in rowPayload) {
         const missingCol = colMatch[1];
-        console.warn(`[Supabase] Column '${missingCol}' not in orders table, preserving inside metadata and retrying.`);
+        console.warn(`[Supabase] Column '${missingCol}' not in orders table, stripping & retrying.`);
         const nextPayload = { ...rowPayload };
         delete nextPayload[missingCol];
         rowPayload = nextPayload;
+        if (missingCol === conflictTarget) conflictTarget = null;
+        if (Object.keys(rowPayload).length === 0) {
+          console.error('SUPABASE INSERT CRITICAL ERROR:', parsedErr);
+          return { saved: false, error: parsedErr };
+        }
         continue;
       }
 
-      return { saved: false, error: `Supabase HTTP ${supaRes.status}: ${errText}` };
+      if ((parsedErr?.code === '22P02' || /invalid input syntax/i.test(msg)) && 'id' in rowPayload) {
+        console.warn('[Supabase] `id` column type mismatch; omitting `id` so DB auto-generates it.');
+        const nextPayload = { ...rowPayload };
+        delete nextPayload.id;
+        rowPayload = nextPayload;
+        conflictTarget = null;
+        continue;
+      }
+
+      console.error('SUPABASE INSERT CRITICAL ERROR:', parsedErr);
+      return { saved: false, error: parsedErr };
     } catch (err: any) {
-      return { saved: false, error: err?.message || 'Supabase network error' };
+      console.error('SUPABASE INSERT CRITICAL ERROR:', err);
+      return { saved: false, error: { message: err?.message || 'Supabase network error' } };
     }
   }
 
-  return { saved: false, error: 'Supabase insert failed after column fallback retries' };
+  return { saved: false, error: { message: 'Supabase insert failed after column fallback retries' } };
 }
 
 const receiveEndpointDocs = (_req: Request, res: Response) => {
@@ -679,6 +841,8 @@ async function handleReceiveOrder(req: Request, res: Response) {
       error: 'Decrypted data is not a valid JSON object'
     });
   }
+
+  console.log('--- RECEIVED & DECRYPTED PAYLOAD ---', orderData);
 
   // 3. Extract & Preserve Order Identifiers and Core Fields
   const incomingOrderId = orderData.orderId || orderData.id || orderData.order_id;
@@ -894,18 +1058,31 @@ async function handleReceiveOrder(req: Request, res: Response) {
     signatureVerified: hmacCheck.hmacVerified
   };
 
-  // Upsert in active in-memory store
+  // Upsert in active in-memory store and notify SSE clients
   const existingIdx = activeOrdersStore.findIndex((o) => o.id === orderId);
   if (existingIdx >= 0) {
     activeOrdersStore[existingIdx] = completeOrderRecord;
   } else {
     activeOrdersStore.unshift(completeOrderRecord);
   }
+  broadcastNewOrderSSE(completeOrderRecord);
 
-  // 8. Await Permanent Storage in Supabase Database
+  // 8. Await Permanent Storage in Supabase Database (NEVER swallow errors if configured)
   const supabaseResult = await saveOrderToSupabase(completeOrderRecord);
+  const resolvedSupabase = resolveSupabaseUrl();
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (resolvedSupabase && supabaseKey && !supabaseResult.saved) {
+    console.error('SUPABASE INSERT CRITICAL ERROR:', supabaseResult.error);
+    return res.status(500).json({
+      success: false,
+      error: supabaseResult.error?.message || 'Supabase insert failed',
+      fullError: supabaseResult.error,
+      hmacVerified: hmacCheck.hmacVerified,
+      orderId
+    });
+  }
 
-  // 9. Dispatch Instant Telegram Alert to Admin
+  // 9. Dispatch Instant Telegram Alert to Admin (try-catch with console.error)
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const tgChatId = process.env.TELEGRAM_CHAT_ID || '@Quadtrix_Ops_Alerts';
   const telegramMessage = `🔔 *नया ऑर्डर आ चुका है!*
@@ -937,7 +1114,7 @@ async function handleReceiveOrder(req: Request, res: Response) {
 
   if (botToken) {
     try {
-      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -946,10 +1123,16 @@ async function handleReceiveOrder(req: Request, res: Response) {
           parse_mode: 'Markdown',
           disable_web_page_preview: false
         })
-      }).catch((err) => {
-        console.warn('Telegram send error:', err);
       });
-    } catch {}
+      if (!tgRes.ok) {
+        const tgErrText = await tgRes.text();
+        console.error('TELEGRAM NOTIFICATION ERROR (API Response):', tgErrText);
+        notificationEntry.status = 'Error';
+      }
+    } catch (tgErr) {
+      console.error('TELEGRAM NOTIFICATION ERROR:', tgErr);
+      notificationEntry.status = 'Error';
+    }
   }
 
   // 10. Record in Audit Trail
@@ -979,7 +1162,7 @@ async function handleReceiveOrder(req: Request, res: Response) {
     mediaUrls: mediaResult.mediaUrls,
     uploadedFiles: mediaResult.uploadedFiles,
     storageProvider: uploadResult.provider,
-    telegramNotification: botToken ? 'Delivered' : 'Simulated',
+    telegramNotification: notificationEntry.status,
     hmacVerified: hmacCheck.hmacVerified,
     supabaseSaved: supabaseResult.saved,
     supabaseError: supabaseResult.error || null,
@@ -1016,30 +1199,51 @@ app.get('/api/orders', async (_req: Request, res: Response) => {
       if (supaRes.ok) {
         const rows = await supaRes.json();
         rows.forEach((r: any) => {
-          const existing = orderMap.get(r.id);
-          orderMap.set(r.id, {
-            id: r.id,
-            referenceCode: r.reference_code || r.id,
-            category: r.category || existing?.category || 'legal',
-            formType: r.form_type || r.raw_payload?.formType || existing?.formType || 'custom_document',
-            formName: r.form_name || existing?.formName || 'Legal Document',
-            clientName: r.client_name || existing?.clientName || 'Client',
-            clientPhone: r.client_phone || existing?.clientPhone || '',
-            clientEmail: r.client_email || r.raw_payload?.clientEmail || existing?.clientEmail || '',
-            state: r.state || r.legal_data?.state || r.raw_payload?.state || existing?.state || 'Delhi',
-            stampDutyValue: r.stamp_duty_value ?? existing?.stampDutyValue ?? 0,
-            status: r.status || existing?.status || 'decrypted',
-            legalData: r.legal_data || existing?.legalData,
-            registrationData: r.registration_data || existing?.registrationData,
-            stampData: r.stamp_data || existing?.stampData,
-            photoUrl: r.photo_url || existing?.photoUrl || null,
-            mediaUrls: r.media_urls || existing?.mediaUrls || [],
-            uploadedFiles: r.raw_payload?.uploadedFiles || existing?.uploadedFiles || [],
-            rawPayload: r.raw_payload || existing?.rawPayload || null,
-            createdAt: r.created_at || existing?.createdAt,
-            updatedAt: r.updated_at || existing?.updatedAt,
-            source: r.source || existing?.source || 'Website A',
-            signatureVerified: existing?.signatureVerified ?? true
+          const p = (r.payload && typeof r.payload === 'object' ? r.payload : null) ||
+                    (r.order_data && typeof r.order_data === 'object' ? r.order_data : null) ||
+                    (r.raw_payload && typeof r.raw_payload === 'object' ? r.raw_payload : null) ||
+                    (r.data && typeof r.data === 'object' ? r.data : null) ||
+                    {};
+          const resolvedId = String(r.docket_id || p.id || p.orderId || r.id);
+          const existing = orderMap.get(resolvedId);
+          const resolvedClientName = r.client_name || r.customer_name || p.clientName || p.party1?.fullName || p.firstParty || existing?.clientName || 'Client';
+          const resolvedFormName = r.form_name || p.formName || p.documentTitle || p.legalData?.documentTitle || existing?.formName || 'Legal Document';
+          const resolvedState = r.state || r.legal_data?.state || p.state || p.legalData?.state || existing?.state || 'Delhi';
+
+          orderMap.set(resolvedId, {
+            id: resolvedId,
+            referenceCode: r.reference_code || r.docket_id || p.referenceCode || resolvedId,
+            category: r.category || p.category || existing?.category || (r.registration_data || p.registrationData ? 'registration' : 'legal'),
+            formType: r.form_type || p.formType || existing?.formType || 'custom_document',
+            formName: resolvedFormName,
+            clientName: resolvedClientName,
+            clientPhone: r.client_phone || p.clientPhone || p.party1?.phone || existing?.clientPhone || '',
+            clientEmail: r.client_email || p.clientEmail || p.party1?.email || existing?.clientEmail || '',
+            state: resolvedState,
+            stampDutyValue: r.stamp_duty_value ?? p.stampDutyValue ?? p.stampDutyAmount ?? existing?.stampDutyValue ?? 0,
+            status: r.status || p.status || existing?.status || 'decrypted',
+            legalData: r.legal_data || p.legalData || existing?.legalData || (p.party1 ? {
+              documentType: p.formType || 'custom_document',
+              documentTitle: resolvedFormName,
+              stampDutyAmount: r.stamp_duty_value ?? p.stampDutyAmount ?? 500,
+              state: resolvedState,
+              executionDate: p.executionDate || new Date().toISOString().split('T')[0],
+              executionPlace: p.executionPlace || resolvedState,
+              party1: p.party1,
+              party2: p.party2,
+              propertyDetails: p.propertyDetails,
+              clauses: p.clauses
+            } : undefined),
+            registrationData: r.registration_data || p.registrationData || existing?.registrationData,
+            stampData: r.stamp_data || p.stampData || existing?.stampData,
+            photoUrl: r.photo_url || p.photoUrl || existing?.photoUrl || null,
+            mediaUrls: r.media_urls || p.mediaUrls || existing?.mediaUrls || [],
+            uploadedFiles: p.uploadedFiles || existing?.uploadedFiles || [],
+            rawPayload: Object.keys(p).length > 0 ? p : (existing?.rawPayload || r),
+            createdAt: r.created_at || p.createdAt || existing?.createdAt,
+            updatedAt: r.updated_at || r.created_at || existing?.updatedAt,
+            source: r.source || p.source || existing?.source || 'Website A',
+            signatureVerified: existing?.signatureVerified ?? Boolean(p.hmacVerified ?? true)
           });
         });
       }
