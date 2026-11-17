@@ -43,6 +43,11 @@ export interface EStampData {
   pdfUrl?: string;                 // Generated Legal PDF download URL
   provider?: string;               // Cloudinary or Local Document Store
   eStampPaperUrl?: string;         // Uploaded e-Stamp scanned paper
+  blankStartPercent?: number;      // AI/manual % from top where agreement text begins on e-Stamp (e.g. 54)
+  blankEndPercent?: number;        // % from top where printable area ends (default 94)
+  topOffsetPt?: number;            // Top blank space in PDF points (out of 842)
+  aiDetectedNotice?: string;       // e.g. "Please write or type below this line"
+  aiAnalyzed?: boolean;
   verified: boolean;
   verifiedAt?: string;
 }

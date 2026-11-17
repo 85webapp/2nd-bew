@@ -11,10 +11,11 @@
  * - Full printable agreement rendered cleanly below
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import { Order } from '../types';
 import { DocumentRenderer } from './DocumentRenderer';
 import { RegistrationChecklistView } from './RegistrationChecklistView';
+import { SubmittedFormDetailsView } from './SubmittedFormDetailsView';
 import { 
   ArrowLeft, 
   Printer, 
@@ -37,6 +38,7 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
   onUpdateOrder,
   onSendNotification
 }) => {
+  const [viewSection, setViewSection] = useState<'all' | 'form' | 'document'>('all');
   const isLegal = order.category === 'legal';
   const hasStamp = Boolean(order.stampData?.verified);
   const stateName = order.state || order.legalData?.state || order.rawPayload?.state || 'NCT of Delhi';
@@ -47,14 +49,6 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
     const lower = url.toLowerCase();
     return lower.includes('.pdf') || lower.includes('application/pdf') || lower.includes('.doc') || lower.includes('/uploads/documents/');
   };
-
-  const extraFields = {
-    ...(order.legalData?.extraFields || {}),
-    ...(order.registrationData?.extraFields || {})
-  };
-  const extraEntries = Object.entries(extraFields).filter(
-    ([, val]) => val !== undefined && val !== null && val !== '' && typeof val !== 'object'
-  );
 
   const uploadedFiles = order.uploadedFiles && order.uploadedFiles.length > 0
     ? order.uploadedFiles
@@ -81,6 +75,10 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
     }
   };
 
+  const hasUploadedStamp = Boolean(order.stampData?.verified && (order.stampData?.scanUrl || order.stampData?.eStampPaperUrl));
+  const [preferOverlay, setPreferOverlay] = useState<boolean>(true);
+  const activeOverlay = hasUploadedStamp && preferOverlay;
+
   return (
     <div className="space-y-6 pb-24 max-w-5xl mx-auto">
       
@@ -91,14 +89,37 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
           {/* Back Button */}
           <button
             onClick={onBack}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-slate-700 hover:text-blue-600 bg-slate-100 hover:bg-slate-200 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-slate-700 hover:text-blue-600 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>Back to Orders</span>
           </button>
 
           {/* Action Buttons: Print A4 Document & Download PDF Only (NO EDIT) */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            {hasUploadedStamp && (
+              <div className="inline-flex rounded-lg border border-gray-200 bg-slate-100 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setPreferOverlay(true)}
+                  className={`px-2.5 py-1.5 rounded-md text-xs font-bold transition-colors cursor-pointer ${
+                    activeOverlay ? 'bg-emerald-600 text-white' : 'text-slate-600'
+                  }`}
+                >
+                  e-Stamp Overlaid
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreferOverlay(false)}
+                  className={`px-2.5 py-1.5 rounded-md text-xs font-bold transition-colors cursor-pointer ${
+                    !activeOverlay ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
+                  }`}
+                >
+                  Clean Draft
+                </button>
+              </div>
+            )}
+
             <button
               onClick={handleDownloadPdf}
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-gray-200 transition-colors cursor-pointer"
@@ -217,31 +238,60 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
           </div>
         )}
 
-        {/* Additional Described Form Fields */}
-        {extraEntries.length > 0 && (
-          <div className="border-t border-gray-100 pt-3">
-            <span className="text-xs font-bold text-slate-700 block mb-2">Submitted Form Details:</span>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-xs">
-              {extraEntries.map(([key, val]) => (
-                <div key={key} className="bg-slate-50 border border-gray-200 rounded-lg px-3 py-1.5">
-                  <span className="text-slate-500 capitalize">{key.replace(/([A-Z])/g, ' $1').replace(/_/g, ' ')}:</span>{' '}
-                  <strong className="text-slate-900 break-words">{String(val)}</strong>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Section Filter Bar */}
+        <div className="border-t border-gray-100 pt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setViewSection('all')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+              viewSection === 'all'
+                ? 'bg-slate-900 text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            All Details &amp; Document
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewSection('form')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+              viewSection === 'form'
+                ? 'bg-slate-900 text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            Submitted Form Fields &amp; Checkboxes Only
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewSection('document')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+              viewSection === 'document'
+                ? 'bg-slate-900 text-white'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            {isLegal ? 'A4 Legal Draft Only' : 'Compliance Checklist Only'}
+          </button>
+        </div>
       </div>
 
+      {/* ================= COMPLETE SUBMITTED FORM DETAILS & CHECKBOXES ================= */}
+      {(viewSection === 'all' || viewSection === 'form') && (
+        <SubmittedFormDetailsView order={order} />
+      )}
+
       {/* ================= DOCUMENT RENDERING CONTENT ================= */}
-      {isLegal ? (
-        <DocumentRenderer order={order} hideRibbon={true} />
-      ) : (
-        <RegistrationChecklistView
-          order={order}
-          onUpdateOrder={onUpdateOrder || (() => {})}
-          onSendNotification={onSendNotification || (() => {})}
-        />
+      {(viewSection === 'all' || viewSection === 'document') && (
+        isLegal ? (
+          <DocumentRenderer order={order} hideRibbon={true} showEStampOverlay={activeOverlay} />
+        ) : (
+          <RegistrationChecklistView
+            order={order}
+            onUpdateOrder={onUpdateOrder || (() => {})}
+            onSendNotification={onSendNotification || (() => {})}
+          />
+        )
       )}
 
     </div>

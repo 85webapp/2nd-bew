@@ -81,6 +81,9 @@ export default async function handler(req, res) {
           formType: r.form_type || p.formType || 'custom_document',
           formName: resolvedFormName,
           category: r.category || p.category || (r.registration_data || p.registrationData ? 'registration' : 'legal'),
+          legalGroup: p.legalGroup,
+          subCategory: p.subCategory,
+          stampDutyPaidBy: p.stampDutyPaidBy || p.stamp_duty_paid_by,
           state: resolvedState,
           stampDutyValue: Number(r.stamp_duty_value ?? p.stampDutyValue ?? p.stampDutyAmount ?? 0),
           status: r.status || p.status || 'received',
@@ -103,6 +106,82 @@ export default async function handler(req, res) {
       console.error('GET /api/orders EXCEPTION:', err);
       return res.status(500).json({ success: false, error: err.message, orders: [] });
     }
+  }
+
+  if (req.method === 'PUT') {
+    const incoming = req.body && typeof req.body === 'object' ? (req.body.order || req.body) : null;
+    const orderId = req.query?.id || incoming?.id;
+
+    if (!orderId || !incoming) {
+      return res.status(400).json({ success: false, error: 'Order ID and payload are required' });
+    }
+
+    if (!cleanUrl || !supabaseKey) {
+      return res.status(200).json({ success: true, order: incoming, supabaseSaved: false });
+    }
+
+    const fullPayloadObj = incoming.rawPayload || incoming;
+    let rowPayload = {
+      id: String(orderId),
+      reference_code: incoming.referenceCode,
+      client_name: incoming.clientName,
+      client_phone: incoming.clientPhone,
+      client_email: incoming.clientEmail || '',
+      form_type: incoming.formType || 'custom_document',
+      form_name: incoming.formName,
+      category: incoming.category,
+      state: incoming.state || 'Delhi',
+      stamp_duty_value: Number(incoming.stampDutyValue || 0),
+      status: incoming.status || 'decrypted',
+      legal_data: incoming.legalData || null,
+      registration_data: incoming.registrationData || null,
+      stamp_data: incoming.stampData || null,
+      raw_payload: fullPayloadObj,
+      payload: fullPayloadObj,
+      order_data: fullPayloadObj,
+      updated_at: new Date().toISOString()
+    };
+
+    let conflictTarget = 'id';
+    for (let attempt = 0; attempt < 15; attempt++) {
+      try {
+        const endpoint = conflictTarget
+          ? `${cleanUrl}/rest/v1/orders?on_conflict=${encodeURIComponent(conflictTarget)}`
+          : `${cleanUrl}/rest/v1/orders?id=eq.${encodeURIComponent(String(orderId))}`;
+        const supaRes = await fetch(endpoint, {
+          method: conflictTarget ? 'POST' : 'PATCH',
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+            'Prefer': conflictTarget ? 'resolution=merge-duplicates,return=representation' : 'return=representation'
+          },
+          body: JSON.stringify(rowPayload)
+        });
+
+        if (supaRes.ok) {
+          return res.status(200).json({ success: true, order: incoming, supabaseSaved: true });
+        }
+
+        const errText = await supaRes.text();
+        let parsedErr;
+        try { parsedErr = JSON.parse(errText); } catch { parsedErr = { message: errText }; }
+        const msg = parsedErr?.message || errText;
+        const colMatch = msg.match(/Could not find the '([^']+)' column/i) ||
+                         msg.match(/column "([^"]+)" of relation "orders" does not exist/i);
+        if (colMatch && colMatch[1] && colMatch[1] in rowPayload) {
+          const next = { ...rowPayload };
+          delete next[colMatch[1]];
+          rowPayload = next;
+          if (colMatch[1] === conflictTarget) conflictTarget = '';
+          continue;
+        }
+        return res.status(500).json({ success: false, error: parsedErr });
+      } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
+      }
+    }
+    return res.status(500).json({ success: false, error: 'Failed to update order in Supabase' });
   }
 
   return res.status(405).json({ error: 'Method Not Allowed' });

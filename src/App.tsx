@@ -365,7 +365,14 @@ export default function App() {
       status: 'success'
     });
 
-    // Permanent Supabase sync
+    // Persist edits to backend server (updates activeOrdersStore, PDF renderer & server-side Supabase)
+    fetch(`/api/orders/${encodeURIComponent(updatedOrder.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedOrder)
+    }).catch(() => {});
+
+    // Permanent client-side Supabase sync
     syncOrderToSupabase(updatedOrder);
   };
 
@@ -492,7 +499,7 @@ export default function App() {
         {/* DEDICATED FULL-PAGE VIEW SCREEN (When user clicks "View" from an order) */}
         {viewingOrder ? (
           <ViewDocumentScreen
-            order={viewingOrder}
+            order={orders.find(o => o.id === viewingOrder.id) || viewingOrder}
             onBack={() => setViewingOrder(null)}
             onUpdateOrder={handleSaveOrder}
             onSendNotification={sendTelegramNotification}

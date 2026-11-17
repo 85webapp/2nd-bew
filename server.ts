@@ -13,7 +13,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import { 
   generateLegalAgreementPdf, 
   uploadPdfToCloudinary, 
@@ -447,7 +447,7 @@ app.get('/api/orders/stream', (req: Request, res: Response) => {
   });
 });
 
-// Dynamic on-demand PDF rendering stream (no server PDF file storage)
+// Dynamic on-demand PDF rendering stream (supports overlaid e-Stamp or clean A4)
 app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {
   const orderId = String(req.query.orderId || '');
   const overlay = req.query.overlay === 'true';
@@ -456,15 +456,121 @@ app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {
     return res.status(404).json({ success: false, error: `Order ${orderId} not found for PDF rendering` });
   }
   try {
+    const useOverlay = overlay || Boolean(order.stampData?.verified && (order.stampData?.scanUrl || order.stampData?.eStampPaperUrl));
     const pdfBuffer = await generateLegalAgreementPdf(
-      { ...order, overlayProvision: overlay || Boolean(order.stampData?.verified) },
-      { overlayProvision: overlay || Boolean(order.stampData?.verified), topBlankSpace: 260 }
+      { ...order, overlayProvision: useOverlay },
+      {
+        overlayProvision: useOverlay,
+        topBlankSpace: order.stampData?.topOffsetPt || 440,
+        stampImageBase64: useOverlay ? (order.stampData?.scanUrl || order.stampData?.eStampPaperUrl) : undefined
+      }
     );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Legal_Document_${orderId}.pdf"`);
     res.send(pdfBuffer);
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// AI e-Stamp Blank-Space & Notice Line Analyzer (Gemini 4 Hydrogen Vision)
+app.post('/api/estamp/analyze', async (req: Request, res: Response) => {
+  if (!geminiClient) {
+    return res.status(503).json({
+      success: false,
+      error: 'GEMINI_API_KEY is not configured in server environment.'
+    });
+  }
+
+  try {
+    const { fileDataUri } = req.body || {};
+    if (!fileDataUri || typeof fileDataUri !== 'string') {
+      return res.status(400).json({ success: false, error: 'fileDataUri is required' });
+    }
+
+    const match = fileDataUri.match(/^data:([^;]+);base64,(.+)$/s);
+    if (!match) {
+      return res.status(400).json({ success: false, error: 'Invalid base64 data URI' });
+    }
+
+    const prompt = `Inspect this Indian e-Stamp Certificate / Non-Judicial Stamp Paper scan carefully.
+Identify:
+1. Whether this is an official e-Stamp / stamp paper.
+2. The exact vertical percentage from the TOP of the page (0 to 100) where the printed e-Stamp certificate header, table, and any notice line (such as "Write down the agreement", "Please write or type below this line", or horizontal divider line) END and the lower blank white area for typing the agreement BEGINS (blankStartPercent). Usually on Indian e-Stamp certificates this is between 42 and 68 percent.
+3. Where the usable blank space ends near the bottom margin (blankEndPercent, typically 93 to 96).
+4. Any visible notice/divider text, Certificate No / UIN, Stamp Duty Amount, State, Article/Purpose, First Party, and Second Party.`;
+
+    const modelsToTry = ['gemini-4-hydrogen', 'gemini-3.8-flash'];
+    let response: any = null;
+    let lastModelErr: any = null;
+    for (const modelName of modelsToTry) {
+      try {
+        response = await geminiClient.models.generateContent({
+          model: modelName,
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: match[1].trim(),
+                  data: match[2].replace(/\s+/g, '')
+                }
+              },
+              { text: prompt }
+            ]
+          },
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                isEStampDetected: { type: Type.BOOLEAN },
+                blankStartPercent: { type: Type.NUMBER },
+                blankEndPercent: { type: Type.NUMBER },
+                noticeLineText: { type: Type.STRING },
+                uin: { type: Type.STRING },
+                stampDutyAmount: { type: Type.NUMBER },
+                state: { type: Type.STRING },
+                article: { type: Type.STRING },
+                firstParty: { type: Type.STRING },
+                secondParty: { type: Type.STRING },
+                reasoning: { type: Type.STRING }
+              },
+              required: ['isEStampDetected', 'blankStartPercent', 'blankEndPercent']
+            }
+          }
+        });
+        break;
+      } catch (mErr: any) {
+        lastModelErr = mErr;
+      }
+    }
+
+    if (!response) {
+      throw lastModelErr || new Error('Gemini analysis unavailable');
+    }
+
+    const rawText = (response.text ?? '{}').trim();
+    const analysis = JSON.parse(rawText);
+
+    const startPct = Math.min(80, Math.max(20, Number(analysis.blankStartPercent) || 54));
+    const endPct = Math.min(97, Math.max(startPct + 12, Number(analysis.blankEndPercent) || 94));
+    const topOffsetPt = Math.round((startPct / 100) * 841.89);
+
+    return res.json({
+      success: true,
+      analysis: {
+        ...analysis,
+        blankStartPercent: Math.round(startPct * 10) / 10,
+        blankEndPercent: Math.round(endPct * 10) / 10,
+        topOffsetPt
+      }
+    });
+  } catch (err: any) {
+    console.error('Gemini e-Stamp analysis error:', err);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to analyze e-Stamp paper with Gemini AI'
+    });
   }
 });
 
@@ -924,7 +1030,7 @@ async function handleReceiveOrder(req: Request, res: Response) {
   ]);
   const topLevelExtraFields: Record<string, any> = {};
   for (const [k, v] of Object.entries(orderData)) {
-    if (!knownSystemKeys.has(k) && v !== undefined && v !== null && v !== '') {
+    if (!knownSystemKeys.has(k) && v !== undefined) {
       topLevelExtraFields[k] = v;
     }
   }
@@ -997,6 +1103,8 @@ async function handleReceiveOrder(req: Request, res: Response) {
     pdfBuffer = await generateLegalAgreementPdf({
       ...orderData,
       id: orderId,
+      category: inferredCategory,
+      stampDutyPaidBy: orderData.stampDutyPaidBy,
       formName,
       clientName,
       clientPhone,
@@ -1004,6 +1112,8 @@ async function handleReceiveOrder(req: Request, res: Response) {
       state,
       stampDutyValue: duty,
       legalData: normalizedLegalData || undefined,
+      registrationData: normalizedRegistrationData || undefined,
+      rawPayload: orderData,
       overlayProvision: true
     });
   } catch (pdfErr: any) {
@@ -1214,6 +1324,9 @@ app.get('/api/orders', async (_req: Request, res: Response) => {
             id: resolvedId,
             referenceCode: r.reference_code || r.docket_id || p.referenceCode || resolvedId,
             category: r.category || p.category || existing?.category || (r.registration_data || p.registrationData ? 'registration' : 'legal'),
+            legalGroup: p.legalGroup || existing?.legalGroup,
+            subCategory: p.subCategory || existing?.subCategory,
+            stampDutyPaidBy: p.stampDutyPaidBy || p.stamp_duty_paid_by || existing?.stampDutyPaidBy,
             formType: r.form_type || p.formType || existing?.formType || 'custom_document',
             formName: resolvedFormName,
             clientName: resolvedClientName,
@@ -1260,12 +1373,56 @@ app.get('/api/orders', async (_req: Request, res: Response) => {
   });
 });
 
+// Update / Edit Order Endpoint (persists A-to-Z edits to active store & Supabase)
+app.put('/api/orders/:id', async (req: Request, res: Response) => {
+  const orderId = decodeURIComponent(String(req.params.id || ''));
+  const incomingOrder = req.body && typeof req.body === 'object' ? (req.body.order || req.body) : null;
+
+  if (!orderId || !incomingOrder || typeof incomingOrder !== 'object') {
+    return res.status(400).json({ success: false, error: 'Order ID and updated order object are required' });
+  }
+
+  const updatedOrder = {
+    ...incomingOrder,
+    id: orderId,
+    updatedAt: new Date().toISOString()
+  };
+
+  const existingIdx = activeOrdersStore.findIndex((o) => o.id === orderId);
+  if (existingIdx >= 0) {
+    activeOrdersStore[existingIdx] = updatedOrder;
+  } else {
+    activeOrdersStore.unshift(updatedOrder);
+  }
+
+  const supaRes = await saveOrderToSupabase(updatedOrder);
+  return res.json({
+    success: true,
+    order: updatedOrder,
+    supabaseSaved: supaRes.saved,
+    supabaseError: supaRes.error || null
+  });
+});
+
 // Flexible e-Stamp Paper Overlay & Merging Provision Endpoint
 app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => {
-  const { orderId, stampPaperImageBase64, topOffset } = req.body;
+  const {
+    orderId,
+    stampPaperImageBase64,
+    topOffset,
+    blankStartPercent,
+    blankEndPercent,
+    aiDetectedNotice,
+    aiAnalyzed,
+    order: fallbackOrder
+  } = req.body;
 
-  // Find order in active store
-  const order = activeOrdersStore.find((o) => o.id === orderId);
+  // Find order in active store or accept passed snapshot
+  let order = activeOrdersStore.find((o) => o.id === orderId);
+  if (!order && fallbackOrder && fallbackOrder.id === orderId) {
+    order = fallbackOrder;
+    activeOrdersStore.unshift(order);
+  }
   if (!order) {
     return res.status(404).json({ success: false, error: 'Order not found for overlay' });
   }
@@ -1277,7 +1434,11 @@ app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => 
       stampUrl = uploadRes.url;
     }
 
-    // Generate PDF with custom topOffset for continuation
+    const startPct = Number(blankStartPercent) || 54;
+    const endPct = Number(blankEndPercent) || 94;
+    const computedTopPt = Number(topOffset) || Math.round((startPct / 100) * 841.89);
+
+    // Generate PDF with exact detected topBlankSpace and embedded e-Stamp scan on Page 1
     const pdfBuffer = await generateLegalAgreementPdf(
       {
         ...order,
@@ -1285,7 +1446,8 @@ app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => 
       },
       {
         overlayProvision: true,
-        topBlankSpace: Number(topOffset) || 280
+        topBlankSpace: computedTopPt,
+        stampImageBase64: stampPaperImageBase64
       }
     );
 
@@ -1293,21 +1455,33 @@ app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => 
     const hostUrl = req.headers.host ? `${req.protocol}://${req.headers.host}` : '';
     const downloadUrl = uploadResult.url.startsWith('http') ? uploadResult.url : `${hostUrl}${uploadResult.url}`;
 
-    // Update order with overlaid PDF
+    // Update order with overlaid PDF & layout offsets
     order.stampData = {
+      ...(order.stampData || {}),
       pdfUrl: downloadUrl,
       verified: true,
       provider: uploadResult.provider,
       eStampAttachedAt: new Date().toISOString(),
-      eStampPaperUrl: stampUrl || order.stampData?.eStampPaperUrl
+      scanUrl: stampUrl || stampPaperImageBase64 || order.stampData?.scanUrl,
+      eStampPaperUrl: stampUrl || stampPaperImageBase64 || order.stampData?.eStampPaperUrl,
+      blankStartPercent: startPct,
+      blankEndPercent: endPct,
+      topOffsetPt: computedTopPt,
+      aiDetectedNotice: aiDetectedNotice || order.stampData?.aiDetectedNotice,
+      aiAnalyzed: Boolean(aiAnalyzed ?? order.stampData?.aiAnalyzed)
     };
+    order.status = 'confirmed_stamp_attached';
+    order.updatedAt = new Date().toISOString();
+
+    await saveOrderToSupabase(order);
 
     return res.json({
       success: true,
       message: 'e-Stamp continuation PDF successfully created',
       orderId,
       pdfDownloadUrl: downloadUrl,
-      eStampPaperUrl: stampUrl
+      eStampPaperUrl: stampUrl || stampPaperImageBase64,
+      stampData: order.stampData
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
