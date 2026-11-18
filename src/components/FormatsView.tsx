@@ -13,7 +13,7 @@
 import React, { useState } from 'react';
 import { Order } from '../types';
 import { formatDateStandard } from '../utils/dateTime';
-import { DocumentRenderer } from './DocumentRenderer';
+import { DocumentRenderer, DocumentErrorBoundary } from './DocumentRenderer';
 import {
   Eye,
   Search,
@@ -34,6 +34,20 @@ interface FormatsViewProps {
   onSelectOrderForView?: (order: Order) => void;
 }
 
+const toSafeString = (val: any, fallback = ''): string => {
+  if (val === undefined || val === null) return fallback;
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (typeof val === 'object') {
+    if ('value' in val && val.value !== undefined) return toSafeString(val.value, fallback);
+    if ('fullName' in val && val.fullName !== undefined) return toSafeString(val.fullName, fallback);
+    if ('name' in val && val.name !== undefined) return toSafeString(val.name, fallback);
+    if ('label' in val && val.label !== undefined) return toSafeString(val.label, fallback);
+    try { return JSON.stringify(val); } catch { return fallback; }
+  }
+  return fallback;
+};
+
 export const FormatsView: React.FC<FormatsViewProps> = ({
   orders
 }) => {
@@ -42,24 +56,27 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
   const [watchingOrder, setWatchingOrder] = useState<Order | null>(null);
   const [watchingWithStampOverlay, setWatchingWithStampOverlay] = useState(false);
 
-  const ordersWithUploadedStamp = orders.filter((o) =>
-    Boolean(o.stampData?.verified && (o.stampData?.scanUrl || o.stampData?.eStampPaperUrl))
+  const safeOrders = Array.isArray(orders) ? orders : [];
+
+  const ordersWithUploadedStamp = safeOrders.filter((o) =>
+    Boolean(o?.stampData?.verified && (o.stampData?.scanUrl || o.stampData?.eStampPaperUrl))
   );
 
-  const sourceList = formatMode === 'estamp' ? ordersWithUploadedStamp : orders;
+  const sourceList = formatMode === 'estamp' ? ordersWithUploadedStamp : safeOrders;
 
   const filteredOrders = sourceList.filter((order) => {
+    if (!order) return false;
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
-    const p1 = order.legalData?.party1?.fullName?.toLowerCase() || order.clientName.toLowerCase();
-    const fn = order.formName.toLowerCase();
-    const id = order.id.toLowerCase();
-    const phone = order.clientPhone.toLowerCase();
+    const p1 = toSafeString(order.legalData?.party1?.fullName || order.clientName).toLowerCase();
+    const fn = toSafeString(order.formName).toLowerCase();
+    const id = toSafeString(order.id).toLowerCase();
+    const phone = toSafeString(order.clientPhone).toLowerCase();
     return p1.includes(q) || fn.includes(q) || id.includes(q) || phone.includes(q);
   });
 
   const currentWatchingOrder = watchingOrder
-    ? (orders.find((o) => o.id === watchingOrder.id) || watchingOrder)
+    ? (safeOrders.find((o) => o.id === watchingOrder.id) || watchingOrder)
     : null;
 
   const hasStampOnCurrent = Boolean(
@@ -74,7 +91,7 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
   const handleDownloadPdf = () => {
     if (currentWatchingOrder) {
       const overlayParam = watchingWithStampOverlay && hasStampOnCurrent ? '&overlay=true' : '';
-      window.open(`/api/documents/render-pdf?orderId=${currentWatchingOrder.id}${overlayParam}`, '_blank');
+      window.open(`/api/documents/render-pdf?orderId=${encodeURIComponent(toSafeString(currentWatchingOrder.id))}${overlayParam}`, '_blank');
     } else {
       window.print();
     }
@@ -85,90 +102,92 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
     const activeOverlay = watchingWithStampOverlay && hasStampOnCurrent;
 
     return (
-      <div className="space-y-6 pb-24 max-w-5xl mx-auto">
-        {/* Top Control Bar */}
-        <div className="no-print bg-white rounded-2xl border border-gray-200 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-          <button
-            onClick={() => setWatchingOrder(null)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-slate-700 hover:text-blue-600 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back to Formats List</span>
-          </button>
+      <DocumentErrorBoundary onBack={() => setWatchingOrder(null)} backLabel="Back to Formats List">
+        <div className="space-y-6 pb-24 max-w-5xl mx-auto">
+          {/* Top Control Bar */}
+          <div className="no-print bg-white rounded-2xl border border-gray-200 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <button
+              onClick={() => setWatchingOrder(null)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-slate-700 hover:text-blue-600 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Back to Formats List</span>
+            </button>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {hasStampOnCurrent && (
-              <div className="inline-flex rounded-lg border border-gray-200 bg-slate-100 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setWatchingWithStampOverlay(false)}
-                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors cursor-pointer ${
-                    !activeOverlay ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Standard A4
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setWatchingWithStampOverlay(true)}
-                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors cursor-pointer ${
-                    activeOverlay ? 'bg-emerald-600 text-white shadow-2xs' : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  e-Stamp Paper Overlaid
-                </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {hasStampOnCurrent && (
+                <div className="inline-flex rounded-lg border border-gray-200 bg-slate-100 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setWatchingWithStampOverlay(false)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors cursor-pointer ${
+                      !activeOverlay ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Standard A4
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWatchingWithStampOverlay(true)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors cursor-pointer ${
+                      activeOverlay ? 'bg-emerald-600 text-white shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    e-Stamp Paper Overlaid
+                  </button>
+                </div>
+              )}
+
+              <button
+                onClick={handleDownloadPdf}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-gray-200 transition-colors cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download PDF</span>
+              </button>
+
+              <button
+                onClick={handlePrint}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all active:scale-95 cursor-pointer"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print A4 Document</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Format Header Vitals */}
+          <div className="no-print bg-white rounded-xl border border-gray-200 p-4 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
+              <div>
+                <span className="text-[10px] uppercase font-bold text-blue-600 tracking-wider">
+                  {activeOverlay
+                    ? 'e-Stamp Paper Overlaid Multi-Page Format'
+                    : 'Generated Legal Document Format (Multi-Page A4 Standard)'}
+                </span>
+                <h2 className="text-base sm:text-lg font-black text-slate-900 uppercase">
+                  {toSafeString(currentWatchingOrder.formName, 'Legal Document')}
+                </h2>
               </div>
-            )}
-
-            <button
-              onClick={handleDownloadPdf}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-gray-200 transition-colors cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download PDF</span>
-            </button>
-
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all active:scale-95 cursor-pointer"
-            >
-              <Printer className="w-4 h-4" />
-              <span>Print A4 Document</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Format Header Vitals */}
-        <div className="no-print bg-white rounded-xl border border-gray-200 p-4 shadow-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
-            <div>
-              <span className="text-[10px] uppercase font-bold text-blue-600 tracking-wider">
-                {activeOverlay
-                  ? 'e-Stamp Paper Overlaid Multi-Page Format'
-                  : 'Generated Legal Document Format (Multi-Page A4 Standard)'}
-              </span>
-              <h2 className="text-base sm:text-lg font-black text-slate-900 uppercase">
-                {currentWatchingOrder.formName}
-              </h2>
+              <div className="font-mono text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-lg">
+                Order: {toSafeString(currentWatchingOrder.id)}
+              </div>
             </div>
-            <div className="font-mono text-xs font-bold text-slate-700 bg-slate-100 px-3 py-1.5 rounded-lg">
-              Order: {currentWatchingOrder.id}
-            </div>
+            <p className="text-xs text-slate-500 pt-2">
+              {activeOverlay
+                ? `Page 1 prints cleanly inside the uploaded e-Stamp zone (${currentWatchingOrder.stampData?.blankStartPercent || 54}% to ${currentWatchingOrder.stampData?.blankEndPercent || 94}%), with remaining clauses flowing onto standard A4 continuation sheets.`
+                : 'Multi-page A4 legal format generated directly from submitted & edited order details. Any edits made in the Edit tab reflect immediately.'}
+            </p>
           </div>
-          <p className="text-xs text-slate-500 pt-2">
-            {activeOverlay
-              ? `Page 1 prints cleanly inside the uploaded e-Stamp zone (${currentWatchingOrder.stampData?.blankStartPercent || 54}% to ${currentWatchingOrder.stampData?.blankEndPercent || 94}%), with remaining clauses flowing onto standard A4 continuation sheets.`
-              : 'Multi-page A4 legal format generated directly from submitted & edited order details. Any edits made in the Edit tab reflect immediately.'}
-          </p>
-        </div>
 
-        {/* Multi-Page A4 Document Rendering (Standard or Overlaid on Uploaded e-Stamp) */}
-        <DocumentRenderer
-          order={currentWatchingOrder}
-          hideRibbon={true}
-          showEStampOverlay={activeOverlay}
-        />
-      </div>
+          {/* Multi-Page A4 Document Rendering (Standard or Overlaid on Uploaded e-Stamp) */}
+          <DocumentRenderer
+            order={currentWatchingOrder}
+            hideRibbon={true}
+            showEStampOverlay={activeOverlay}
+          />
+        </div>
+      </DocumentErrorBoundary>
     );
   }
 
@@ -262,22 +281,25 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
           filteredOrders.map((order) => {
             const hasStamp = Boolean(order.stampData?.verified);
             const dateStd = formatDateStandard(order.createdAt);
-            const party1Name = order.legalData?.party1?.fullName || order.registrationData?.applicantName || order.clientName;
-            const contactPhone = order.legalData?.party1?.phone || order.clientPhone;
+            const party1Name = toSafeString(order.legalData?.party1?.fullName || order.registrationData?.applicantName || order.clientName, 'First Party');
+            const contactPhone = toSafeString(order.legalData?.party1?.phone || order.clientPhone, '—');
+            const cardFormName = toSafeString(order.formName, 'Legal Document');
+            const cardOrderId = toSafeString(order.id);
+            const cardStampDuty = Number(order.stampDutyValue ?? 0) || 0;
 
             return (
               <div
-                key={order.id}
+                key={cardOrderId}
                 className="bg-white rounded-xl border border-gray-200 hover:border-blue-400 p-4 sm:p-5 shadow-xs transition-all hover:shadow-md"
               >
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   {/* Left Column */}
                   <div className="space-y-1 flex-1">
                     <h2 className="text-base sm:text-lg font-black text-slate-900 tracking-tight uppercase leading-snug">
-                      {order.formName}
+                      {cardFormName}
                     </h2>
                     <div className="font-mono text-xs font-bold text-blue-600 tracking-wide">
-                      {order.id}
+                      {cardOrderId}
                     </div>
                     <div className="flex items-center gap-1.5 text-xs text-slate-800 pt-0.5">
                       <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -317,7 +339,7 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
                         Stamp Paper Price
                       </span>
                       <div className="text-lg sm:text-xl font-black text-slate-950 font-mono text-blue-600 leading-tight">
-                        ₹ {order.stampDutyValue}
+                        ₹ {cardStampDuty}
                       </div>
                       <span className="text-[11px] text-slate-500 font-medium block mt-0.5">
                         Date: {dateStd}

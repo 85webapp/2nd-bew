@@ -170,42 +170,59 @@ export async function fetchOrdersFromSupabase(customConfig?: SupabaseConfig): Pr
     });
 
     if (!res.ok) return [];
+    const safeJson = (val: any): any => {
+      if (!val) return null;
+      if (typeof val === 'object') return val;
+      if (typeof val === 'string') {
+        const trimmed = val.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try { return JSON.parse(trimmed); } catch {}
+        }
+      }
+      return null;
+    };
+
     const rows = await res.json();
-    return rows.map((r: any) => {
-      const p = (r.payload && typeof r.payload === 'object' ? r.payload : null) ||
-                (r.order_data && typeof r.order_data === 'object' ? r.order_data : null) ||
-                (r.raw_payload && typeof r.raw_payload === 'object' ? r.raw_payload : null) ||
-                (r.data && typeof r.data === 'object' ? r.data : null) ||
-                {};
+    return (Array.isArray(rows) ? rows : []).map((r: any) => {
+      const pRaw = safeJson(r.payload) || safeJson(r.order_data) || safeJson(r.raw_payload) || safeJson(r.data) || {};
+      const p = (pRaw && typeof pRaw === 'object' && !Array.isArray(pRaw)) ? pRaw : {};
+      const rLegal = safeJson(r.legal_data);
+      const pLegal = safeJson(p.legalData);
+      const rReg = safeJson(r.registration_data);
+      const pReg = safeJson(p.registrationData);
+      const rStamp = safeJson(r.stamp_data);
+      const pStamp = safeJson(p.stampData);
+      const rMedia = safeJson(r.media_urls);
+      const pMedia = safeJson(p.mediaUrls);
 
       const resolvedId = r.docket_id || p.id || p.orderId || r.id;
-      const resolvedClientName = r.client_name || r.customer_name || p.clientName || p.party1?.fullName || p.firstParty || 'Client';
-      const resolvedFormName = r.form_name || p.formName || p.documentTitle || p.legalData?.documentTitle || 'Legal Document';
-      const resolvedState = r.state || r.legal_data?.state || p.state || p.legalData?.state || 'Delhi';
+      const resolvedClientName = String(r.client_name || r.customer_name || p.clientName || p.party1?.fullName || p.firstParty || 'Client');
+      const resolvedFormName = String(r.form_name || p.formName || p.documentTitle || pLegal?.documentTitle || 'Legal Document');
+      const resolvedState = String(r.state || rLegal?.state || p.state || pLegal?.state || 'Delhi');
 
       return {
         id: String(resolvedId),
-        referenceCode: r.reference_code || r.docket_id || p.referenceCode || String(resolvedId),
-        category: r.category || p.category || (r.registration_data || p.registrationData ? 'registration' : 'legal'),
+        referenceCode: String(r.reference_code || r.docket_id || p.referenceCode || resolvedId),
+        category: r.category || p.category || (rReg || pReg ? 'registration' : 'legal'),
         legalGroup: p.legalGroup,
         subCategory: p.subCategory,
         stampDutyPaidBy: p.stampDutyPaidBy || p.stamp_duty_paid_by,
-        formType: r.form_type || p.formType || 'custom_document',
+        formType: String(r.form_type || p.formType || 'custom_document'),
         formName: resolvedFormName,
         clientName: resolvedClientName,
-        clientPhone: r.client_phone || p.clientPhone || p.party1?.phone || '',
-        clientEmail: r.client_email || p.clientEmail || p.party1?.email || '',
+        clientPhone: String(r.client_phone || p.clientPhone || p.party1?.phone || ''),
+        clientEmail: String(r.client_email || p.clientEmail || p.party1?.email || ''),
         state: resolvedState,
         stampDutyValue: Number(r.stamp_duty_value ?? p.stampDutyValue ?? p.stampDutyAmount ?? 0),
         createdAt: r.created_at || p.createdAt || new Date().toISOString(),
         updatedAt: r.updated_at || r.created_at || new Date().toISOString(),
         status: r.status || p.status || 'received',
-        legalData: r.legal_data || p.legalData,
-        registrationData: r.registration_data || p.registrationData,
-        stampData: r.stamp_data || p.stampData,
+        legalData: rLegal || pLegal,
+        registrationData: rReg || pReg,
+        stampData: rStamp || pStamp,
         photoUrl: r.photo_url || p.photoUrl || null,
-        mediaUrls: r.media_urls || p.mediaUrls || [],
-        uploadedFiles: p.uploadedFiles || [],
+        mediaUrls: Array.isArray(rMedia) ? rMedia : (Array.isArray(pMedia) ? pMedia : []),
+        uploadedFiles: Array.isArray(p.uploadedFiles) ? p.uploadedFiles : [],
         rawPayload: Object.keys(p).length > 0 ? p : r,
         source: r.source || p.source || 'Website A',
         signatureVerified: Boolean(p.hmacVerified ?? true)

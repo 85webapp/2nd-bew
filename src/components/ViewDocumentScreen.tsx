@@ -13,7 +13,7 @@
 
 import React, { useState } from 'react';
 import { Order } from '../types';
-import { DocumentRenderer } from './DocumentRenderer';
+import { DocumentRenderer, DocumentErrorBoundary } from './DocumentRenderer';
 import { RegistrationChecklistView } from './RegistrationChecklistView';
 import { SubmittedFormDetailsView } from './SubmittedFormDetailsView';
 import { 
@@ -284,7 +284,9 @@ export const ViewDocumentScreen: React.FC<ViewDocumentScreenProps> = ({
       {/* ================= DOCUMENT RENDERING CONTENT ================= */}
       {(viewSection === 'all' || viewSection === 'document') && (
         isLegal ? (
-          <DocumentRenderer order={order} hideRibbon={true} showEStampOverlay={activeOverlay} />
+          <DocumentErrorBoundary onBack={onBack} backLabel="Back to Orders">
+            <DocumentRenderer order={order} hideRibbon={true} showEStampOverlay={activeOverlay} />
+          </DocumentErrorBoundary>
         ) : (
           <RegistrationChecklistView
             order={order}

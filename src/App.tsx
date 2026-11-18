@@ -21,6 +21,7 @@ import { OrdersView } from './components/OrdersView';
 import { EditView } from './components/EditView';
 import { UploadView } from './components/UploadView';
 import { FormatsView } from './components/FormatsView';
+import { DocumentErrorBoundary } from './components/DocumentRenderer';
 import { ViewDocumentScreen } from './components/ViewDocumentScreen';
 import { SettingsModal } from './components/SettingsModal';
 import { ProfileDrawerModal } from './components/ProfileDrawerModal';
@@ -562,64 +563,64 @@ export default function App() {
 
       {/* 2. Main Content Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-5">
-        
-        {/* DEDICATED FULL-PAGE VIEW SCREEN (When user clicks "View" from an order) */}
-        {viewingOrder ? (
-          <ViewDocumentScreen
-            order={orders.find(o => o.id === viewingOrder.id) || viewingOrder}
-            onBack={() => setViewingOrder(null)}
-            onUpdateOrder={handleSaveOrder}
-            onSendNotification={sendTelegramNotification}
-          />
-        ) : (
-          <>
-            {/* TAB 1: ORDERS */}
-            {activeTab === 'orders' && (
-              <OrdersView
-                orders={orders}
-                onSelectOrderForView={(order) => {
-                  setSelectedOrder(order);
-                  setViewingOrder(order);
-                }}
-                onOpenUnlocker={() => setIsUnlockerOpen(true)}
-              />
-            )}
+        <DocumentErrorBoundary onBack={() => { setViewingOrder(null); setActiveTab('orders'); }} backLabel="Return to Orders">
+          {/* DEDICATED FULL-PAGE VIEW SCREEN (When user clicks "View" from an order) */}
+          {viewingOrder ? (
+            <ViewDocumentScreen
+              order={orders.find(o => o.id === viewingOrder.id) || viewingOrder}
+              onBack={() => setViewingOrder(null)}
+              onUpdateOrder={handleSaveOrder}
+              onSendNotification={sendTelegramNotification}
+            />
+          ) : (
+            <>
+              {/* TAB 1: ORDERS */}
+              {activeTab === 'orders' && (
+                <OrdersView
+                  orders={orders}
+                  onSelectOrderForView={(order) => {
+                    setSelectedOrder(order);
+                    setViewingOrder(order);
+                  }}
+                  onOpenUnlocker={() => setIsUnlockerOpen(true)}
+                />
+              )}
 
-            {/* TAB 2: EDIT */}
-            {activeTab === 'edit' && (
-              <EditView
-                orders={orders}
-                currentOrder={selectedOrder}
-                onSelectOrder={setSelectedOrder}
-                onSaveOrder={handleSaveOrder}
-                onSendNotification={sendTelegramNotification}
-              />
-            )}
+              {/* TAB 2: EDIT */}
+              {activeTab === 'edit' && (
+                <EditView
+                  orders={orders}
+                  currentOrder={selectedOrder}
+                  onSelectOrder={setSelectedOrder}
+                  onSaveOrder={handleSaveOrder}
+                  onSendNotification={sendTelegramNotification}
+                />
+              )}
 
-            {/* TAB 3: UPLOAD */}
-            {activeTab === 'upload' && (
-              <UploadView
-                orders={orders}
-                currentOrder={selectedOrder}
-                onSelectOrder={setSelectedOrder}
-                onSaveOrder={handleSaveOrder}
-                onSendNotification={sendTelegramNotification}
-              />
-            )}
+              {/* TAB 3: UPLOAD */}
+              {activeTab === 'upload' && (
+                <UploadView
+                  orders={orders}
+                  currentOrder={selectedOrder}
+                  onSelectOrder={setSelectedOrder}
+                  onSaveOrder={handleSaveOrder}
+                  onSendNotification={sendTelegramNotification}
+                />
+              )}
 
-            {/* TAB 4: FORMATS */}
-            {activeTab === 'formats' && (
-              <FormatsView
-                orders={orders}
-                onSelectOrderForView={(order) => {
-                  setSelectedOrder(order);
-                  setViewingOrder(order);
-                }}
-              />
-            )}
-          </>
-        )}
-
+              {/* TAB 4: FORMATS */}
+              {activeTab === 'formats' && (
+                <FormatsView
+                  orders={orders}
+                  onSelectOrderForView={(order) => {
+                    setSelectedOrder(order);
+                    setViewingOrder(order);
+                  }}
+                />
+              )}
+            </>
+          )}
+        </DocumentErrorBoundary>
       </main>
 
       {/* 3. Bottom Navigation: Exactly 4 Fixed Tabs (Orders, Edit, Upload, Formats) */}

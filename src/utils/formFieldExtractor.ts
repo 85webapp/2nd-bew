@@ -74,17 +74,47 @@ export function isValueEmpty(val: any): boolean {
   return false;
 }
 
+function safeObj(val: any): Record<string, any> {
+  if (!val) return {};
+  if (typeof val === 'string') {
+    const t = val.trim();
+    if (t.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(t);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      } catch {}
+    }
+    return {};
+  }
+  if (typeof val === 'object' && !Array.isArray(val)) return val;
+  return {};
+}
+
+function safeLabelStr(val: any, fallback = ''): string {
+  if (val === undefined || val === null) return fallback;
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (typeof val === 'object') {
+    if (typeof val.label === 'string') return val.label;
+    if (typeof val.title === 'string') return val.title;
+    if (typeof val.name === 'string') return val.name;
+    if (typeof val.value === 'string' || typeof val.value === 'number') return String(val.value);
+    try { return JSON.stringify(val); } catch { return fallback; }
+  }
+  return fallback;
+}
+
 /**
  * Unwraps nested objects from rawPayload (formData, fields, answers, data) into a flat list of lookup objects.
  */
 function buildLookupScopes(order: Order): Record<string, any>[] {
   if (!order) return [];
-  const raw = (order.rawPayload && typeof order.rawPayload === 'object') ? order.rawPayload : {};
+  const raw = safeObj(order.rawPayload);
   const scopes: Record<string, any>[] = [];
 
   const pushIfObj = (obj: any) => {
-    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      scopes.push(obj);
+    const parsed = safeObj(obj);
+    if (Object.keys(parsed).length > 0) {
+      scopes.push(parsed);
     }
   };
 
@@ -95,9 +125,9 @@ function buildLookupScopes(order: Order): Record<string, any>[] {
   pushIfObj(raw.data);
   pushIfObj(raw.form);
   pushIfObj(order.legalData);
-  pushIfObj(order.legalData?.extraFields);
+  pushIfObj(safeObj(order.legalData).extraFields);
   pushIfObj(order.registrationData);
-  pushIfObj(order.registrationData?.extraFields);
+  pushIfObj(safeObj(order.registrationData).extraFields);
   pushIfObj(order.stampData);
   pushIfObj(order as any);
 
@@ -224,14 +254,16 @@ const SKIP_SYSTEM_KEYS = new Set([
 function extractAllCheckboxes(order: Order, scopes: Record<string, any>[]): ExtractedCheckboxItem[] {
   const map = new Map<string, ExtractedCheckboxItem>();
 
-  const addCheckbox = (rawKey: string, rawLabel: string, checked: boolean, isOptional = false, group?: string) => {
-    const dedupeKey = normalizeKey(rawLabel.replace(/^[^:]+:\s*/, ''));
-    const nk = dedupeKey || normalizeKey(rawKey);
+  const addCheckbox = (rawKey: any, rawLabel: any, checked: boolean, isOptional = false, group?: string) => {
+    const keyStr = safeLabelStr(rawKey, 'option');
+    const labelStr = safeLabelStr(rawLabel, keyStr);
+    const dedupeKey = normalizeKey(labelStr.replace(/^[^:]+:\s*/, ''));
+    const nk = dedupeKey || normalizeKey(keyStr);
     if (!nk) return;
     if (!map.has(nk)) {
       map.set(nk, {
-        key: rawKey || nk,
-        label: rawLabel,
+        key: keyStr || nk,
+        label: labelStr,
         checked: Boolean(checked),
         isOptional,
         group
@@ -333,11 +365,13 @@ function extractAllCheckboxes(order: Order, scopes: Record<string, any>[]): Extr
   }
 
   // 3. Check documentChecklist items for registration leads
-  if (order.registrationData?.documentChecklist?.length) {
-    order.registrationData.documentChecklist.forEach((doc) => {
+  const regObj = safeObj(order.registrationData);
+  if (Array.isArray(regObj.documentChecklist) && regObj.documentChecklist.length > 0) {
+    regObj.documentChecklist.forEach((doc: any, idx: number) => {
+      if (!doc || typeof doc !== 'object') return;
       addCheckbox(
-        `doc_${doc.id}`,
-        `${doc.label} (Uploaded / Submitted)`,
+        `doc_${safeLabelStr(doc.id, String(idx))}`,
+        `${safeLabelStr(doc.label, 'Document')} (Uploaded / Submitted)`,
         Boolean(doc.uploaded || doc.verified),
         !doc.required,
         'Checklist Verification'
@@ -569,9 +603,11 @@ export function extractCompleteOrderInspection(order: Order): ExtractedOrderInsp
     }
   } else {
     // LEGAL DOCUMENT FORMS (Full 11-Month Rent Agreement + All Legal Formats)
-    const p1Obj = order.legalData?.party1 || (order.rawPayload as any)?.party1 || {};
-    const p2Obj = order.legalData?.party2 || (order.rawPayload as any)?.party2 || {};
-    const propObj = order.legalData?.propertyDetails || (order.rawPayload as any)?.propertyDetails || {};
+    const parsedLegal = safeObj(order.legalData);
+    const parsedRaw = safeObj(order.rawPayload);
+    const p1Obj = safeObj(parsedLegal.party1 || parsedRaw.party1);
+    const p2Obj = safeObj(parsedLegal.party2 || parsedRaw.party2);
+    const propObj = safeObj(parsedLegal.propertyDetails || parsedRaw.propertyDetails);
 
     const p1Scopes = [p1Obj, ...scopes];
     const p2Scopes = [p2Obj, ...scopes];
