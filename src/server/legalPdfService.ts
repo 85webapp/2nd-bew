@@ -93,27 +93,100 @@ export interface LegalOrderPayload {
   [key: string]: any;
 }
 
+function normalizePdfDedupKey(str: string): string {
+  return String(str || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
+
+function normalizePdfDedupValue(val: any): string {
+  if (val === undefined || val === null) return '';
+  return String(val)
+    .toLowerCase()
+    .replace(/₹|rs\.?|inr|\/-/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getCloudinaryCredentials(): { cloudName: string; apiKey: string; apiSecret: string } | null {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
+  const apiKey = process.env.CLOUDINARY_API_KEY?.trim();
+  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
+  if (cloudName && apiKey && apiSecret) {
+    return { cloudName, apiKey, apiSecret };
+  }
+  const cloudinaryUrl = process.env.CLOUDINARY_URL?.trim();
+  if (cloudinaryUrl) {
+    const m = cloudinaryUrl.match(/^cloudinary:\/\/([^:]+):([^@]+)@([^/?#]+)/i);
+    if (m) {
+      return { apiKey: decodeURIComponent(m[1]), apiSecret: decodeURIComponent(m[2]), cloudName: m[3] };
+    }
+  }
+  return null;
+}
+
 /**
  * Generates an official, clean Legal Document PDF.
  * Does NOT generate a fake government e-Stamp header.
- * If overlayProvision is true, reserves blank continuation space on top of Page 1
- * for when the administrator overlays or prints this on an official e-Stamp certificate.
+ * If overlayProvision is true, constrains Page 1 strictly between topBlankSpace and bottomBlankSpace
+ * for clean overlay onto an official e-Stamp certificate, flowing remainder to Page 2+.
  */
 export async function generateLegalAgreementPdf(
   order: LegalOrderPayload,
-  options: { overlayProvision?: boolean; topBlankSpace?: number; stampImageBase64?: string } = {}
+  options: { overlayProvision?: boolean; topBlankSpace?: number; bottomBlankSpace?: number; stampImageBase64?: string } = {}
 ): Promise<Buffer> {
+  // Pre-fetch remote Cloudinary / HTTP stamp image buffer if needed before building PDF synchronously
+  let stampImageBuffer: Buffer | null = null;
+  const isOverlay = options.overlayProvision ?? (order.overlayProvision || false);
+  if (isOverlay && options.stampImageBase64 && typeof options.stampImageBase64 === 'string') {
+    const imgSrc = options.stampImageBase64.trim();
+    const imgMatch = imgSrc.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
+    if (imgMatch && imgMatch[2]) {
+      try {
+        stampImageBuffer = Buffer.from(imgMatch[2].replace(/\s+/g, ''), 'base64');
+      } catch {}
+    } else if (/^https?:\/\//i.test(imgSrc) && !/\.pdf(\?|$)/i.test(imgSrc)) {
+      try {
+        const imgResp = await fetch(imgSrc);
+        if (imgResp.ok) {
+          const ct = (imgResp.headers.get('content-type') || '').toLowerCase();
+          if (ct.includes('image/png') || ct.includes('image/jpeg') || ct.includes('image/jpg')) {
+            stampImageBuffer = Buffer.from(await imgResp.arrayBuffer());
+          }
+        }
+      } catch {}
+    }
+  }
+
   return new Promise((resolve, reject) => {
     try {
-      const isOverlay = options.overlayProvision ?? (order.overlayProvision || false);
-      const startY = isOverlay ? (options.topBlankSpace || 440) : 45;
+      const startY = isOverlay ? Math.max(120, Math.min(700, options.topBlankSpace || 440)) : 45;
+      const bottomLimitY = isOverlay
+        ? Math.max(startY + 90, Math.min(805, options.bottomBlankSpace || 791))
+        : 792;
+      const page1BottomMargin = isOverlay ? Math.max(36, Math.round(841.89 - bottomLimitY)) : 45;
 
       const doc = new PDFDocument({
         size: 'A4',
-        margins: { top: 40, bottom: 40, left: 45, right: 45 },
+        margins: { top: 40, bottom: page1BottomMargin, left: 45, right: 45 },
         autoFirstPage: true,
         bufferPages: true
       });
+
+      let currentPageIndex = 0;
+      doc.on('pageAdded', () => {
+        currentPageIndex += 1;
+        doc.page.margins.bottom = 45;
+      });
+
+      const pageMaxY = (clearance = 40) => {
+        const limit = currentPageIndex === 0 && isOverlay ? bottomLimitY : 792;
+        return limit - clearance;
+      };
+
+      const ensurePageSpace = (minSpace = 50) => {
+        if (doc.y > pageMaxY(minSpace)) {
+          doc.addPage();
+        }
+      };
 
       const buffers: Buffer[] = [];
       doc.on('data', buffers.push.bind(buffers));
@@ -194,24 +267,20 @@ export async function generateLegalAgreementPdf(
 
       const inspection = extractCompleteOrderInspection(order as any);
 
-      // Embed uploaded e-Stamp image across Page 1 if provided (PNG / JPEG)
-      if (isOverlay && options.stampImageBase64 && typeof options.stampImageBase64 === 'string') {
+      // Embed uploaded e-Stamp image across Page 1 if available (PNG / JPEG buffer)
+      if (isOverlay && stampImageBuffer) {
         try {
-          const imgMatch = options.stampImageBase64.match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/i);
-          if (imgMatch && imgMatch[2]) {
-            const imgBuf = Buffer.from(imgMatch[2].replace(/\s+/g, ''), 'base64');
-            doc.image(imgBuf, 0, 0, { width: 595.28, height: 841.89 });
-          }
+          doc.image(stampImageBuffer, 0, 0, { width: 595.28, height: 841.89 });
         } catch {
           // If unsupported image format, continue with clean continuation offset
         }
       }
 
       // If in overlay mode without a scan image, show an unobtrusive guideline marker
-      if (isOverlay && !options.stampImageBase64) {
+      if (isOverlay && !stampImageBuffer) {
         doc.font('Helvetica').fontSize(7.5).fillColor('#94a3b8');
-        doc.text('— [e-STAMP CERTIFICATE CONTINUATION AREA] —', 45, startY - 18, { align: 'center', width: 505 });
-        doc.moveTo(45, startY - 8).lineTo(550, startY - 8).lineWidth(0.5).stroke('#cbd5e1');
+        doc.text('— [e-STAMP CERTIFICATE CONTINUATION AREA] —', 45, Math.max(24, startY - 18), { align: 'center', width: 505 });
+        doc.moveTo(45, Math.max(32, startY - 8)).lineTo(550, Math.max(32, startY - 8)).lineWidth(0.5).stroke('#cbd5e1');
       }
 
       // Title
@@ -235,7 +304,7 @@ export async function generateLegalAgreementPdf(
       doc.moveDown(0.85);
 
       // Recital
-      if (doc.y > 730) doc.addPage();
+      ensurePageSpace(50);
       doc.font('Times-Roman').fontSize(10).fillColor('#1e293b').text(
         `THIS AGREEMENT / INSTRUMENT is made and entered into on this ${execDate} at ${execPlace}, ${state}, by and between:`,
         { align: 'justify' }
@@ -243,7 +312,7 @@ export async function generateLegalAgreementPdf(
       doc.moveDown(0.6);
 
       // First Party Box (including Email ID, Entity Type, Age, PAN, Aadhaar, Mobile, Address, PIN, POA, Ownership Proof)
-      if (doc.y > 710) doc.addPage();
+      ensurePageSpace(70);
       const p1Parts: string[] = [p1.fullName || order.clientName || 'First Party'];
       if (p1EntityType) p1Parts.push(`(${p1EntityType})`);
       if (p1.relativeName) p1Parts.push(`${p1.relationshipType || 'S/o'} ${p1.relativeName}`);
@@ -265,7 +334,7 @@ export async function generateLegalAgreementPdf(
 
       // Second Party Box (when p2 exists, including Email ID, Entity Type, Age, PAN, Aadhaar, Mobile, Address, PIN, Occupants)
       if (p2 && (p2.fullName || p2.phone || p2Email || p2.address || prop)) {
-        if (doc.y > 710) doc.addPage();
+        ensurePageSpace(70);
         const p2Parts: string[] = [p2.fullName || 'Second Party'];
         if (p2EntityType) p2Parts.push(`(${p2EntityType})`);
         if (p2.relativeName) p2Parts.push(`${p2.relationshipType || 'S/o'} ${p2.relativeName}`);
@@ -292,7 +361,7 @@ export async function generateLegalAgreementPdf(
       const maintenanceCharges = pickVal(prop?.maintenanceCharges, raw.maintenanceCharges, raw.monthlyMaintenance, rawFormData.maintenanceCharges);
 
       if (prop || leaseCommencementDate || purposeOfTenancy) {
-        if (doc.y > 690) doc.addPage();
+        ensurePageSpace(90);
         doc.font('Times-Bold').fontSize(10).fillColor('#0f172a').text('PREMISES & LEASE TENURE PARTICULARS:');
         doc.font('Times-Roman').fontSize(9).fillColor('#334155');
         const propLines: string[] = [];
@@ -313,7 +382,7 @@ export async function generateLegalAgreementPdf(
 
       // Affidavit details if present
       if (aff) {
-        if (doc.y > 700) doc.addPage();
+        ensurePageSpace(80);
         doc.font('Times-Bold').fontSize(10).fillColor('#0f172a').text('SWORN AFFIDAVIT PARTICULARS:');
         doc.font('Times-Roman').fontSize(9).fillColor('#334155');
         if (aff.deponentName) doc.text(`• Deponent: ${aff.deponentName}`);
@@ -330,7 +399,7 @@ export async function generateLegalAgreementPdf(
       }
 
       // Operative Part & Terms
-      if (doc.y > 710) doc.addPage();
+      ensurePageSpace(70);
       doc.font('Times-Bold').fontSize(10.5).fillColor('#0f172a').text('NOW THIS AGREEMENT WITNESSETH AS UNDER:');
       doc.moveDown(0.5);
 
@@ -362,7 +431,7 @@ export async function generateLegalAgreementPdf(
         : (order.clauses || defaultClauses);
 
       clausesToPrint.forEach((cl: any, index: number) => {
-        if (doc.y > 700) doc.addPage();
+        ensurePageSpace(70);
         const title = cl.title || `CLAUSE ${index + 1}`;
         const body = cl.body || cl.text || String(cl);
         doc.font('Times-Bold').fontSize(9.5).fillColor('#0f172a').text(`${index + 1}. ${title}: `, 45, doc.y, { continued: true });
@@ -372,12 +441,12 @@ export async function generateLegalAgreementPdf(
 
       // Checkboxes / Confirmed Declarations & Amenities
       if (inspection.checkboxes.length > 0) {
-        if (doc.y > 680) doc.addPage();
+        ensurePageSpace(90);
         doc.moveDown(0.3);
         doc.font('Times-Bold').fontSize(9.5).fillColor('#0f172a').text('CONFIRMED DECLARATIONS, AMENITIES & SUBMITTED OPTIONS:');
         doc.moveDown(0.25);
         inspection.checkboxes.forEach((cb) => {
-          if (doc.y > 740) doc.addPage();
+          ensurePageSpace(28);
           doc.font('Times-Roman').fontSize(8.8).fillColor('#334155').text(
             `${cb.checked ? '[YES]' : '[NO ]'} ${cb.label} — ${cb.checked ? 'Confirmed' : 'Not Selected'}`,
             50,
@@ -387,36 +456,97 @@ export async function generateLegalAgreementPdf(
         doc.moveDown(0.6);
       }
 
-      // Schedule of ALL Remaining Submitted Form Particulars (A-to-Z Complete Record)
-      const renderedCoreKeys = new Set([
-        'documentCategory', 'stateUt', 'purposeOfTenancy', 'stampPaperMode', 'stampPaperValue', 'stampDutyPaidBy',
-        'executionDate', 'executionPlace', 'landlordEntityType', 'party1EntityType', 'party1FullName',
-        'party1RelativeName', 'party1Age', 'party1Address', 'party1Phone', 'party1Email', 'party1Aadhaar',
-        'party1Pan', 'party1Poa', 'party1PoaHolderName', 'propertyOwnershipProofType',
-        'lesseeEntityType', 'party2FullName', 'party2RelativeName', 'party2Age', 'party2Address',
-        'party2Phone', 'party2Email', 'party2Aadhaar', 'party2Pan', 'occupantDetails',
-        'rentedPropertyAddress', 'premisesType', 'leaseTenure', 'leaseCommencementDate', 'leaseEndDate',
-        'monthlyRent', 'securityDeposit', 'maintenanceCharges', 'lockInPeriodMonths', 'noticePeriodDays',
-        'utilityChargesBorneBy', 'deponentName', 'reasonForAffidavit', 'oldName', 'newName',
-        'gapDuration', 'educationalInstitution', 'declarationStatements'
+      // Schedule of Additional Unique Submitted Form Particulars (Zero Duplicate Values/Keys)
+      const renderedCoreKeysNorm = new Set([
+        'documentcategory', 'rentcategory', 'leasecategory', 'agreementcategory', 'state', 'stateut',
+        'stateorut', 'unionterritory', 'jurisdictionstate', 'purposeoftenancy', 'specificpurpose',
+        'tenancypurpose', 'purpose', 'stamppapermode', 'stampprocurementmode', 'procurementmode',
+        'stamppapervalue', 'stampdutyvalue', 'stampdutyamount', 'stampvalue', 'stampdutypaidby',
+        'stamppaidby', 'costpaidby', 'executiondate', 'agreementdate', 'executionplace',
+        'placeofexecution', 'city', 'landlordentitytype', 'lessorentitytype', 'firstpartyentitytype',
+        'party1entitytype', 'party1fullname', 'landlordname', 'lessorname', 'firstpartyname',
+        'firstparty', 'clientname', 'applicantname', 'party1relativename', 'landlordfathername',
+        'lessorfathername', 'party1age', 'landlordage', 'party1address', 'landlordaddress',
+        'lessoraddress', 'party1phone', 'landlordphone', 'landlordmobile', 'clientphone',
+        'party1email', 'landlordemail', 'lessoremail', 'clientemail', 'party1aadhaar',
+        'landlordaadhaar', 'party1pan', 'landlordpan', 'party1pincode', 'landlordpincode',
+        'party1poa', 'signedbypoa', 'party1poaholdername', 'poaholdername', 'poadetails',
+        'propertyownershipprooftype', 'proofofpropertyownertype', 'ownershipprooftype',
+        'lesseeentitytype', 'tenantentitytype', 'secondpartyentitytype', 'party2entitytype',
+        'party2fullname', 'tenantname', 'lesseename', 'secondpartyname', 'secondparty',
+        'party2relativename', 'tenantfathername', 'party2age', 'tenantage', 'party2address',
+        'tenantaddress', 'lesseeaddress', 'party2phone', 'tenantphone', 'tenantmobile',
+        'party2email', 'tenantemail', 'lesseeemail', 'party2aadhaar', 'tenantaadhaar',
+        'party2pan', 'tenantpan', 'party2pincode', 'tenantpincode', 'occupantdetails',
+        'familymemberdetails', 'occupants', 'rentedpropertyaddress', 'propertyaddress',
+        'premisesaddress', 'premisestype', 'propertytype', 'leasetenure', 'leaseduration',
+        'agreementdurationmonths', 'durationmonths', 'tenure', 'leasecommencementdate',
+        'commencementdate', 'startdate', 'leaseenddate', 'expirydate', 'enddate',
+        'monthlyrent', 'monthlyrentorconsideration', 'rentamount', 'rent', 'securitydeposit',
+        'depositamount', 'deposit', 'maintenancecharges', 'monthlymaintenance', 'lockinperiodmonths',
+        'lockinperiod', 'noticeperioddays', 'noticeperiod', 'utilitychargesborneby',
+        'electricitywatercharges', 'deponentname', 'reasonforaffidavit', 'oldname', 'newname',
+        'gapduration', 'educationalinstitution', 'declarationstatements',
+        'id', 'orderid', 'docketid', 'referencecode', 'formname', 'formtype', 'documenttitle',
+        'documenttype', 'category', 'subcategory', 'status', 'source', 'createdat', 'updatedat',
+        'receivedat', 'hmacverified', 'isdecrypted', 'signatureverified'
       ]);
 
-      const extraSubmittedEntries = inspection.sections.flatMap((sec) =>
-        sec.fields
-          .filter((f) => !f.isEmpty && (order.category === 'registration' || !renderedCoreKeys.has(f.key)))
-          .map((f) => ({
-            label: f.label,
-            value: typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value)
-          }))
-      );
+      const renderedValuesNorm = new Set<string>();
+      [
+        order.id, order.formName, order.legalData?.documentTitle, state, execDate, execPlace,
+        duty, documentCategory, purposeOfTenancy, stampPaperMode, stampDutyPaidBy,
+        p1.fullName, order.clientName, p1EntityType, p1.relativeName, p1.age, p1.pan,
+        p1Aadhaar, p1.phone, order.clientPhone, p1Email, order.clientEmail,
+        p1.address, p1Pincode, p1PoaHolder, p1OwnershipProof,
+        p2?.fullName, p2EntityType, p2?.relativeName, p2?.age, p2?.pan,
+        p2Aadhaar, p2?.phone, p2Email, p2?.address, p2Pincode, formattedOccupants,
+        prop?.fullAddress, prop?.premisesType, prop?.monthlyRentOrConsideration,
+        prop?.securityDeposit, prop?.agreementDurationMonths, leaseTenure,
+        leaseCommencementDate, leaseEndDate, maintenanceCharges,
+        prop?.lockInPeriodMonths, prop?.noticePeriodDays, prop?.utilityChargesBorneBy,
+        aff?.deponentName, aff?.reasonForAffidavit, aff?.oldName,
+        aff?.newName, aff?.gapDuration, aff?.educationalInstitution
+      ].forEach((val) => {
+        const nv = normalizePdfDedupValue(val);
+        if (nv && nv.length >= 2) {
+          renderedValuesNorm.add(nv);
+        }
+      });
+
+      const seenScheduleLabels = new Set<string>();
+      const seenSchedulePairs = new Set<string>();
+      const extraSubmittedEntries: Array<{ label: string; value: string }> = [];
+
+      for (const sec of inspection.sections) {
+        for (const f of sec.fields) {
+          if (f.isEmpty) continue;
+          const nk = normalizePdfDedupKey(f.key);
+          const nl = normalizePdfDedupKey(f.label);
+          if (order.category !== 'registration' && renderedCoreKeysNorm.has(nk)) continue;
+
+          const rawStr = typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value);
+          if (rawStr.startsWith('data:') && rawStr.includes(';base64,')) continue;
+
+          const nv = normalizePdfDedupValue(rawStr);
+          if (!nv || nv === 'not provided' || nv === 'na' || nv === '—') continue;
+          if (order.category !== 'registration' && renderedValuesNorm.has(nv)) continue;
+          if (seenScheduleLabels.has(nl) || seenSchedulePairs.has(`${nl}:${nv}`) || seenSchedulePairs.has(nv)) continue;
+
+          seenScheduleLabels.add(nl);
+          seenSchedulePairs.add(`${nl}:${nv}`);
+          seenSchedulePairs.add(nv);
+          extraSubmittedEntries.push({ label: f.label, value: rawStr });
+        }
+      }
 
       if (extraSubmittedEntries.length > 0) {
-        if (doc.y > 680) doc.addPage();
+        ensurePageSpace(80);
         doc.moveDown(0.3);
-        doc.font('Times-Bold').fontSize(9.5).fillColor('#0f172a').text('SCHEDULE OF COMPLETE SUBMITTED PARTICULARS:');
+        doc.font('Times-Bold').fontSize(9.5).fillColor('#0f172a').text('SCHEDULE OF ADDITIONAL SUBMITTED PARTICULARS:');
         doc.moveDown(0.25);
         extraSubmittedEntries.forEach((entry) => {
-          if (doc.y > 740) doc.addPage();
+          ensurePageSpace(28);
           doc.font('Times-Bold').fontSize(8.8).fillColor('#1e293b').text(`• ${entry.label}: `, 50, doc.y, { continued: true });
           doc.font('Times-Roman').fillColor('#334155').text(entry.value, { align: 'left' });
         });
@@ -424,9 +554,7 @@ export async function generateLegalAgreementPdf(
       }
 
       // Signature Block
-      if (doc.y > 620) {
-        doc.addPage();
-      }
+      ensurePageSpace(140);
 
       doc.moveDown(1.1);
       doc.font('Times-Bold').fontSize(9.5).fillColor('#0f172a').text(
@@ -448,7 +576,7 @@ export async function generateLegalAgreementPdf(
 
       // Witness Section
       doc.y = sigY + 55;
-      if (doc.y > 700) doc.addPage();
+      ensurePageSpace(65);
       doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#334155').text('WITNESSES:');
       doc.font('Times-Roman').fontSize(8).fillColor('#64748b');
       const submittedWitnesses = order.legalData?.witnesses || raw.witnesses;
@@ -497,12 +625,11 @@ export async function uploadPdfToCloudinary(
   orderId: string,
   fileName: string = 'legal_document.pdf'
 ): Promise<{ success: boolean; url: string; provider: string; publicId?: string; error?: string }> {
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const creds = getCloudinaryCredentials();
 
-  if (cloudName && apiKey && apiSecret) {
+  if (creds) {
     try {
+      const { cloudName, apiKey, apiSecret } = creds;
       const timestamp = Math.round(Date.now() / 1000);
       const publicId = `ctc_${orderId}_${timestamp}`;
       const paramsToSign = `public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
@@ -660,12 +787,11 @@ export async function uploadMediaToCloudinary(
 
   const { mimeType, ext, kind, rawBase64 } = inferMimeAndExtension(trimmed, options?.fileName, options?.mimeType);
 
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  const creds = getCloudinaryCredentials();
 
-  if (cloudName && apiKey && apiSecret) {
+  if (creds) {
     try {
+      const { cloudName, apiKey, apiSecret } = creds;
       const timestamp = Math.round(Date.now() / 1000);
       const publicId = `${publicIdPrefix}_${timestamp}`;
       const paramsToSign = `public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;

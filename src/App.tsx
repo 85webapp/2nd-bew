@@ -104,13 +104,33 @@ export default function App() {
     return `CTC-2026-${maxNum + 1}`;
   };
 
-  // Save to localStorage
+  // Save to localStorage (debounced + strip >100KB inline base64 strings so main thread stays snappy & quota-safe)
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(orders));
-    } catch (e) {
-      console.error('Failed to save orders', e);
-    }
+    const timer = setTimeout(() => {
+      try {
+        const compactOrders = orders.map((o) => {
+          const stripBigUri = (val?: string) =>
+            typeof val === 'string' && val.length > 100_000 && val.startsWith('data:')
+              ? undefined
+              : val;
+          return {
+            ...o,
+            stampData: o.stampData
+              ? {
+                  ...o.stampData,
+                  scanUrl: stripBigUri(o.stampData.scanUrl) || o.stampData.scanUrl,
+                  eStampPaperUrl: stripBigUri(o.stampData.eStampPaperUrl) || o.stampData.eStampPaperUrl,
+                  pdfUrl: stripBigUri(o.stampData.pdfUrl)
+                }
+              : o.stampData
+          };
+        });
+        localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(compactOrders));
+      } catch (e) {
+        console.warn('localStorage quota skipped for oversized payload:', e);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
   }, [orders]);
 
   useEffect(() => {
@@ -167,24 +187,71 @@ export default function App() {
     };
   }, []);
 
-  // Sync with Backend Server & Supabase on startup and periodic interval (every 2.5s)
+  // Helper to merge remote orders into state only when actual changes exist & never clobber newer local edits
+  const mergeRemoteOrders = (prev: Order[], incoming: Order[]): Order[] => {
+    if (!Array.isArray(incoming) || incoming.length === 0) return prev;
+    const prevMap = new Map<string, Order>(prev.map((o) => [o.id, o]));
+    const orderMap = new Map<string, Order>();
+    let changed = false;
+
+    for (const srv of incoming) {
+      const loc = prevMap.get(srv.id);
+      if (loc) {
+        const locTime = Date.parse(loc.updatedAt || loc.createdAt || '0') || 0;
+        const srvTime = Date.parse(srv.updatedAt || srv.createdAt || '0') || 0;
+        // Keep local copy if it is strictly newer OR already has verified e-Stamp overlay while server snapshot doesn't
+        const keepLocal =
+          locTime > srvTime ||
+          (Boolean(loc.stampData?.verified) && !srv.stampData?.verified);
+        const chosen = keepLocal ? loc : srv;
+        if (
+          chosen === loc ||
+          (loc.updatedAt === srv.updatedAt &&
+            loc.status === srv.status &&
+            loc.clientName === srv.clientName &&
+            loc.formName === srv.formName &&
+            loc.stampDutyValue === srv.stampDutyValue &&
+            Boolean(loc.stampData?.verified) === Boolean(srv.stampData?.verified) &&
+            loc.stampData?.scanUrl === srv.stampData?.scanUrl &&
+            loc.stampData?.pdfUrl === srv.stampData?.pdfUrl &&
+            loc.stampData?.blankStartPercent === srv.stampData?.blankStartPercent &&
+            loc.stampData?.blankEndPercent === srv.stampData?.blankEndPercent)
+        ) {
+          orderMap.set(srv.id, loc);
+        } else {
+          changed = true;
+          orderMap.set(srv.id, chosen);
+        }
+      } else {
+        changed = true;
+        orderMap.set(srv.id, srv);
+      }
+    }
+
+    for (const loc of prev) {
+      if (!orderMap.has(loc.id)) {
+        orderMap.set(loc.id, loc);
+      }
+    }
+
+    if (!changed && orderMap.size === prev.length) {
+      return prev;
+    }
+    return Array.from(orderMap.values());
+  };
+
+  // Sync with Backend Server & Supabase on startup and low-overhead background interval (every 18s when visible)
   useEffect(() => {
     const syncRemote = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
       try {
         const serverRes = await fetch('/api/orders');
         if (serverRes.ok) {
           const serverData = await serverRes.json();
-          if (serverData.success && Array.isArray(serverData.orders)) {
-            setOrders(prev => {
-              const orderMap = new Map<string, Order>();
-              // First add server orders (which are sorted newest first)
-              serverData.orders.forEach((o: Order) => orderMap.set(o.id, o));
-              // Then add any local orders that might not be on the server
-              prev.forEach(o => {
-                if (!orderMap.has(o.id)) orderMap.set(o.id, o);
-              });
-              return Array.from(orderMap.values());
-            });
+          if (serverData.success && Array.isArray(serverData.orders) && serverData.orders.length > 0) {
+            setOrders((prev) => mergeRemoteOrders(prev, serverData.orders));
             return;
           }
         }
@@ -194,50 +261,50 @@ export default function App() {
 
       const remoteOrders = await fetchOrdersFromSupabase();
       if (remoteOrders.length > 0) {
-        setOrders(prev => {
-          const map = new Map<string, Order>();
-          remoteOrders.forEach(o => map.set(o.id, o));
-          prev.forEach(o => {
-            if (!map.has(o.id)) map.set(o.id, o);
-          });
-          return Array.from(map.values());
-        });
+        setOrders((prev) => mergeRemoteOrders(prev, remoteOrders));
       }
     };
 
     syncRemote();
-    const interval = setInterval(syncRemote, 2500);
+    const interval = setInterval(syncRemote, 18000);
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-decrypt any pending orders in state using client masterKey if not yet decrypted
+  // Auto-decrypt only when pending orders actually exist
+  const pendingDecryptionIds = orders
+    .filter((o) => o.status === 'pending_decryption' && Boolean(o.encryptedPayload))
+    .map((o) => o.id)
+    .join(',');
+
   useEffect(() => {
-    if (!masterKey) return;
+    if (!masterKey || !pendingDecryptionIds) return;
     orders.forEach(async (order) => {
       if (order.status === 'pending_decryption' && order.encryptedPayload) {
         const res = await decryptPayload(order.encryptedPayload, masterKey);
         if (res.success && res.data) {
           const decryptedData = res.data;
-          setOrders(prev => prev.map(o => {
-            if (o.id === order.id) {
-              return {
-                ...o,
-                status: 'decrypted',
-                clientName: decryptedData.clientName || decryptedData.party1?.fullName || o.clientName,
-                formName: decryptedData.formName || decryptedData.documentTitle || o.formName,
-                clientPhone: decryptedData.clientPhone || decryptedData.party1?.phone || o.clientPhone,
-                stampDutyValue: Number(decryptedData.stampDutyValue || decryptedData.stampDutyAmount || o.stampDutyValue),
-                legalData: decryptedData.legalData || (decryptedData.party1 ? decryptedData : o.legalData),
-                registrationData: decryptedData.registrationData || o.registrationData,
-                rawPayload: decryptedData
-              };
-            }
-            return o;
-          }));
+          setOrders((prev) =>
+            prev.map((o) => {
+              if (o.id === order.id) {
+                return {
+                  ...o,
+                  status: 'decrypted',
+                  clientName: decryptedData.clientName || decryptedData.party1?.fullName || o.clientName,
+                  formName: decryptedData.formName || decryptedData.documentTitle || o.formName,
+                  clientPhone: decryptedData.clientPhone || decryptedData.party1?.phone || o.clientPhone,
+                  stampDutyValue: Number(decryptedData.stampDutyValue || decryptedData.stampDutyAmount || o.stampDutyValue),
+                  legalData: decryptedData.legalData || (decryptedData.party1 ? decryptedData : o.legalData),
+                  registrationData: decryptedData.registrationData || o.registrationData,
+                  rawPayload: decryptedData
+                };
+              }
+              return o;
+            })
+          );
         }
       }
     });
-  }, [orders, masterKey]);
+  }, [pendingDecryptionIds, masterKey]);
 
   // AUTO-DECRYPTION ON APP LOAD (?payload=... or ?data=...)
   useEffect(() => {

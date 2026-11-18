@@ -217,9 +217,17 @@ async function uploadMedia(mediaData, publicId) {
   if (!mediaData || typeof mediaData !== 'string') return null;
   if (mediaData.startsWith('http://') || mediaData.startsWith('https://')) return mediaData;
 
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
+  let cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim();
+  let apiKey = process.env.CLOUDINARY_API_KEY?.trim();
+  let apiSecret = process.env.CLOUDINARY_API_SECRET?.trim();
+  if ((!cloudName || !apiKey || !apiSecret) && process.env.CLOUDINARY_URL) {
+    const m = process.env.CLOUDINARY_URL.trim().match(/^cloudinary:\/\/([^:]+):([^@]+)@([^/?#]+)/i);
+    if (m) {
+      apiKey = decodeURIComponent(m[1]);
+      apiSecret = decodeURIComponent(m[2]);
+      cloudName = m[3];
+    }
+  }
 
   if (!cloudName || !apiKey || !apiSecret) return null;
 

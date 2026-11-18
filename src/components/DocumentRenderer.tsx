@@ -30,6 +30,43 @@ const A4_SIDE_PADDING_PX = 52;
 const A4_CONTENT_WIDTH_PX = A4_WIDTH_PX - A4_SIDE_PADDING_PX * 2; // 690px
 const STANDARD_USABLE_HEIGHT_PX = 995; // 1123 - top/bottom margins & footer
 
+class DocumentErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; errorMsg: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorMsg: '' };
+  }
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, errorMsg: error?.message || 'Document rendering error' };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="bg-white rounded-2xl border border-red-200 p-8 text-center max-w-2xl mx-auto space-y-2">
+          <h3 className="text-base font-bold text-red-700">Unable to Render Document Preview</h3>
+          <p className="text-xs text-slate-600">{this.state.errorMsg}</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function normalizeDedupKey(str: string): string {
+  return String(str || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
+
+function normalizeDedupValue(val: any): string {
+  if (val === undefined || val === null) return '';
+  return String(val)
+    .toLowerCase()
+    .replace(/₹|rs\.?|inr|\/-/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
   order,
   onEditRequest,
@@ -423,29 +460,103 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
       });
     }
 
-    // Embed ALL Additional / Custom & Remaining Submitted Form Particulars (A-to-Z Complete Record)
-    const renderedCoreKeys = new Set([
-      'documentCategory', 'stateUt', 'purposeOfTenancy', 'stampPaperMode', 'stampPaperValue', 'stampDutyPaidBy',
-      'executionDate', 'executionPlace', 'landlordEntityType', 'party1EntityType', 'party1FullName',
-      'party1RelativeName', 'party1Age', 'party1Address', 'party1Phone', 'party1Email', 'party1Aadhaar',
-      'party1Pan', 'party1Poa', 'party1PoaHolderName', 'propertyOwnershipProofType',
-      'lesseeEntityType', 'party2FullName', 'party2RelativeName', 'party2Age', 'party2Address',
-      'party2Phone', 'party2Email', 'party2Aadhaar', 'party2Pan', 'occupantDetails',
-      'rentedPropertyAddress', 'premisesType', 'leaseTenure', 'leaseCommencementDate', 'leaseEndDate',
-      'monthlyRent', 'securityDeposit', 'maintenanceCharges', 'lockInPeriodMonths', 'noticePeriodDays',
-      'utilityChargesBorneBy', 'deponentName', 'reasonForAffidavit', 'oldName', 'newName',
-      'gapDuration', 'educationalInstitution', 'declarationStatements'
+    // Embed ALL Additional / Custom & Remaining Unique Submitted Form Particulars (Zero Duplicates!)
+    const renderedCoreKeysNorm = new Set([
+      'documentcategory', 'rentcategory', 'leasecategory', 'agreementcategory', 'state', 'stateut',
+      'stateorut', 'unionterritory', 'jurisdictionstate', 'purposeoftenancy', 'specificpurpose',
+      'tenancypurpose', 'purpose', 'stamppapermode', 'stampprocurementmode', 'procurementmode',
+      'stamppapervalue', 'stampdutyvalue', 'stampdutyamount', 'stampvalue', 'stampdutypaidby',
+      'stamppaidby', 'costpaidby', 'executiondate', 'agreementdate', 'executionplace',
+      'placeofexecution', 'city', 'landlordentitytype', 'lessorentitytype', 'firstpartyentitytype',
+      'party1entitytype', 'party1fullname', 'landlordname', 'lessorname', 'firstpartyname',
+      'firstparty', 'clientname', 'applicantname', 'party1relativename', 'landlordfathername',
+      'lessorfathername', 'party1age', 'landlordage', 'party1address', 'landlordaddress',
+      'lessoraddress', 'party1phone', 'landlordphone', 'landlordmobile', 'clientphone',
+      'party1email', 'landlordemail', 'lessoremail', 'clientemail', 'party1aadhaar',
+      'landlordaadhaar', 'party1pan', 'landlordpan', 'party1pincode', 'landlordpincode',
+      'party1poa', 'signedbypoa', 'party1poaholdername', 'poaholdername', 'poadetails',
+      'propertyownershipprooftype', 'proofofpropertyownertype', 'ownershipprooftype',
+      'lesseeentitytype', 'tenantentitytype', 'secondpartyentitytype', 'party2entitytype',
+      'party2fullname', 'tenantname', 'lesseename', 'secondpartyname', 'secondparty',
+      'party2relativename', 'tenantfathername', 'party2age', 'tenantage', 'party2address',
+      'tenantaddress', 'lesseeaddress', 'party2phone', 'tenantphone', 'tenantmobile',
+      'party2email', 'tenantemail', 'lesseeemail', 'party2aadhaar', 'tenantaadhaar',
+      'party2pan', 'tenantpan', 'party2pincode', 'tenantpincode', 'occupantdetails',
+      'familymemberdetails', 'occupants', 'rentedpropertyaddress', 'propertyaddress',
+      'premisesaddress', 'premisestype', 'propertytype', 'leasetenure', 'leaseduration',
+      'agreementdurationmonths', 'durationmonths', 'tenure', 'leasecommencementdate',
+      'commencementdate', 'startdate', 'leaseenddate', 'expirydate', 'enddate',
+      'monthlyrent', 'monthlyrentorconsideration', 'rentamount', 'rent', 'securitydeposit',
+      'depositamount', 'deposit', 'maintenancecharges', 'monthlymaintenance', 'lockinperiodmonths',
+      'lockinperiod', 'noticeperioddays', 'noticeperiod', 'utilitychargesborneby',
+      'electricitywatercharges', 'deponentname', 'reasonforaffidavit', 'oldname', 'newname',
+      'gapduration', 'educationalinstitution', 'declarationstatements',
+      'id', 'orderid', 'docketid', 'referencecode', 'formname', 'formtype', 'documenttitle',
+      'documenttype', 'category', 'subcategory', 'status', 'source', 'createdat', 'updatedat',
+      'receivedat', 'hmacverified', 'isdecrypted', 'signatureverified'
     ]);
 
-    const extraSubmittedEntries = inspection.sections.flatMap((sec) =>
-      sec.fields
-        .filter((f) => !f.isEmpty && (order.category === 'registration' || !renderedCoreKeys.has(f.key)))
-        .map((f) => ({
-          id: `${sec.id}_${f.key}`,
+    // Track every core value already printed in the agreement body above so Website A's repeated values never duplicate
+    const renderedValuesNorm = new Set<string>();
+    [
+      order.id, order.referenceCode, order.formName, legalData.documentTitle,
+      legalData.state, legalData.executionDate, legalData.executionPlace,
+      order.stampDutyValue, legalData.stampDutyAmount, documentCategory,
+      purposeOfTenancy, stampPaperMode, stampDutyPaidBy,
+      party1.fullName, p1EntityType, party1.relativeName, party1.age, party1.pan,
+      p1Aadhaar, party1.phone, order.clientPhone, p1Email, order.clientEmail,
+      party1.address, p1Pincode, p1PoaHolder, p1OwnershipProof,
+      party2?.fullName, p2EntityType, party2?.relativeName, party2?.age, party2?.pan,
+      p2Aadhaar, party2?.phone, p2Email, party2?.address, p2Pincode, formattedOccupants,
+      prop?.fullAddress, prop?.premisesType, prop?.monthlyRentOrConsideration,
+      prop?.securityDeposit, prop?.agreementDurationMonths, leaseTenure,
+      leaseCommencementDate, leaseEndDate, maintenanceCharges,
+      prop?.lockInPeriodMonths, prop?.noticePeriodDays, prop?.utilityChargesBorneBy,
+      affidavit?.deponentName, affidavit?.reasonForAffidavit, affidavit?.oldName,
+      affidavit?.newName, affidavit?.gapDuration, affidavit?.educationalInstitution
+    ].forEach((val) => {
+      const nv = normalizeDedupValue(val);
+      if (nv && nv.length >= 2) {
+        renderedValuesNorm.add(nv);
+      }
+    });
+
+    const seenScheduleLabels = new Set<string>();
+    const seenScheduleValuePairs = new Set<string>();
+    const extraSubmittedEntries: Array<{ id: string; label: string; value: string }> = [];
+
+    for (const sec of inspection.sections) {
+      for (const f of sec.fields) {
+        if (f.isEmpty) continue;
+        const nk = normalizeDedupKey(f.key);
+        const nl = normalizeDedupKey(f.label);
+        if (order.category !== 'registration' && renderedCoreKeysNorm.has(nk)) continue;
+
+        const rawStr = typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value);
+        // Never print huge base64 strings inside document text
+        if (rawStr.startsWith('data:') && rawStr.includes(';base64,')) continue;
+
+        const nv = normalizeDedupValue(rawStr);
+        if (!nv || nv === 'not provided' || nv === 'na' || nv === '—') continue;
+
+        // Skip values already printed verbatim in Header / Party 1 / Party 2 / Property Schedule
+        if (order.category !== 'registration' && renderedValuesNorm.has(nv)) continue;
+
+        // Prevent duplicate rows inside the extra schedule itself
+        if (seenScheduleLabels.has(nl) || seenScheduleValuePairs.has(`${nl}:${nv}`) || seenScheduleValuePairs.has(nv)) {
+          continue;
+        }
+        seenScheduleLabels.add(nl);
+        seenScheduleValuePairs.add(`${nl}:${nv}`);
+        seenScheduleValuePairs.add(nv);
+
+        extraSubmittedEntries.push({
+          id: `${sec.id}_${f.key}_${extraSubmittedEntries.length}`,
           label: f.label,
-          value: typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value)
-        }))
-    );
+          value: rawStr
+        });
+      }
+    }
 
     if (extraSubmittedEntries.length > 0) {
       list.push({
@@ -453,7 +564,7 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
         node: (
           <div className="pb-3">
             <h4 className="font-bold text-xs uppercase tracking-wider text-slate-900 mb-1.5 border-b border-slate-300 pb-0.5">
-              Schedule of Complete Submitted Particulars:
+              Schedule of Additional Submitted Particulars:
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] bg-slate-50/70 p-2.5 rounded border border-slate-200">
               {extraSubmittedEntries.map((item) => (
@@ -596,8 +707,16 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
       computedPages.push(currentPage);
     }
 
-    setPages(computedPages);
+    setPages(computedPages.length > 0 ? computedPages : [blocks.map((_, i) => i)]);
   }, [blocks, page1CapacityPx]);
+
+  // Defensive sanitized page indices so changing to an order with fewer blocks never crashes pre-layout render
+  const safePages = useMemo(() => {
+    const valid = pages
+      .map((indices) => indices.filter((idx) => idx >= 0 && idx < blocks.length))
+      .filter((indices) => indices.length > 0);
+    return valid.length > 0 ? valid : [blocks.map((_, i) => i)];
+  }, [pages, blocks]);
 
   const handlePrint = () => {
     window.print();
@@ -626,219 +745,245 @@ export const DocumentRenderer: React.FC<DocumentRendererProps> = ({
   }
 
   return (
-    <div className="space-y-4">
-      {/* Top Action Ribbon (No-Print) */}
-      {!hideRibbon && (
-        <div className="no-print bg-white rounded-xl border border-gray-200 p-4 flex flex-wrap items-center justify-between gap-3 shadow-xs">
-          <div className="flex items-center gap-2">
-            <div className="p-2 rounded-lg bg-blue-50 text-blue-600">
-              <Stamp className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <span>{order.formName}</span>
-                {stampData?.verified ? (
-                  <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                    <CheckCircle className="w-3 h-3" /> e-Stamp Attached
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-semibold">
-                    e-Stamp Pending
-                  </span>
-                )}
+    <DocumentErrorBoundary>
+      <div className="space-y-4">
+        {/* Top Action Ribbon (No-Print) */}
+        {!hideRibbon && (
+          <div className="no-print bg-white rounded-xl border border-gray-200 p-4 flex flex-wrap items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2">
+              <div className="p-2 rounded-lg bg-blue-50 text-blue-600">
+                <Stamp className="w-5 h-5" />
               </div>
-              <div className="text-xs text-slate-500">
-                Ref: <span className="font-mono">{order.id}</span> • Stamp Duty: ₹{order.stampDutyValue} • State: {legalData.state}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {!stampData && onUploadStampRequest && (
-              <button
-                onClick={onUploadStampRequest}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-white shadow-xs transition-colors"
-              >
-                Attach e-Stamp
-              </button>
-            )}
-
-            {onEditRequest && (
-              <button
-                onClick={onEditRequest}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-gray-200 transition-colors"
-              >
-                Edit Fields
-              </button>
-            )}
-
-            <button
-              onClick={handleCopyText}
-              className="p-2 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-gray-200 transition-colors"
-              title="Copy Raw Text"
-            >
-              <Download className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all active:scale-95 print-keep"
-            >
-              <Printer className="w-4 h-4" />
-              Print A4 Document
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Multi-Page Summary Bar (No-Print) */}
-      <div className="no-print max-w-[794px] mx-auto bg-white rounded-xl border border-gray-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs shadow-2xs">
-        <div className="flex items-center gap-2 font-bold text-slate-800">
-          <Layers className="w-4 h-4 text-blue-600" />
-          <span>
-            Total A4 Pages: <strong className="text-blue-700">{pages.length}</strong>{' '}
-            ({pages.length === 1 ? '1 Sheet' : `${pages.length} Sheets`})
-          </span>
-        </div>
-        {isOverlayActive ? (
-          <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded">
-            Page 1: Overlaid on Uploaded e-Stamp (Start at {blankStartPercent}%) • Pages 2–{pages.length}: Continuation A4
-          </span>
-        ) : (
-          <span className="text-[11px] font-semibold text-slate-500">
-            Standard A4 Multi-Page Format (210mm × 297mm)
-          </span>
-        )}
-      </div>
-
-      {/* Hidden Measurement Container (Exact A4 inner width) */}
-      <div
-        aria-hidden="true"
-        className="font-legal text-slate-900 leading-relaxed text-[13.5px]"
-        style={{
-          position: 'fixed',
-          left: '-99999px',
-          top: 0,
-          width: `${A4_CONTENT_WIDTH_PX}px`,
-          visibility: 'hidden',
-          pointerEvents: 'none'
-        }}
-      >
-        {blocks.map((block, idx) => (
-          <div
-            key={block.id}
-            ref={(el) => {
-              measureRefs.current[idx] = el;
-            }}
-          >
-            {block.node}
-          </div>
-        ))}
-      </div>
-
-      {/* Rendered Multi-Page A4 Sheets Container */}
-      <div ref={containerRef} id="printable-legal-document" className="print-only-container space-y-6">
-        {pages.map((blockIndices, pageIdx) => {
-          const isFirstPage = pageIdx === 0;
-          const isOverlaidPage1 = isFirstPage && isOverlayActive;
-
-          return (
-            <div
-              key={pageIdx}
-              style={{
-                width: `${Math.round(A4_WIDTH_PX * scale)}px`,
-                height: `${Math.round(A4_HEIGHT_PX * scale)}px`
-              }}
-              className="mx-auto"
-            >
-              <div
-                style={{
-                  width: `${A4_WIDTH_PX}px`,
-                  height: `${A4_HEIGHT_PX}px`,
-                  transform: scale < 1 ? `scale(${scale})` : undefined,
-                  transformOrigin: 'top left'
-                }}
-                className="a4-sheet-page relative bg-white border border-gray-300 shadow-lg overflow-hidden font-legal text-slate-900 leading-relaxed text-[13.5px]"
-              >
-                {/* Page 1 e-Stamp Background Layer (when uploaded & overlay active) */}
-                {isOverlaidPage1 && (
-                  <>
-                    {isStampPdf ? (
-                      <div className="absolute inset-0 bg-amber-50/15">
-                        <iframe
-                          src={uploadedStampImage}
-                          title="Uploaded e-Stamp PDF"
-                          className="w-full pointer-events-none border-0"
-                          style={{ height: `${blankStartPercent}%` }}
-                        />
-                        <div
-                          className="no-print absolute left-0 right-0 border-t-2 border-dashed border-blue-400/70"
-                          style={{ top: `${blankStartPercent}%` }}
-                        />
-                      </div>
-                    ) : (
-                      <img
-                        src={uploadedStampImage}
-                        alt="Uploaded Official e-Stamp Paper"
-                        className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
-                      />
-                    )}
-
-                    {/* Subtle divider guide (screen only, hidden in print so physical e-Stamp prints cleanly) */}
-                    <div
-                      className="no-print absolute left-[52px] right-[52px] border-t border-dashed border-blue-500/60 flex justify-end"
-                      style={{ top: `${page1TopPx - 6}px` }}
-                    >
-                      <span className="text-[9px] font-sans font-bold text-blue-600 bg-white/90 px-1.5 -mt-2.5 rounded">
-                        Overlaid Agreement Starts ({blankStartPercent}%)
-                      </span>
-                    </div>
-                  </>
-                )}
-
-                {/* Continuation Header on Page 2+ */}
-                {!isFirstPage && (
-                  <div className="absolute top-4 left-[52px] right-[52px] flex items-center justify-between text-[10px] font-sans text-slate-400 border-b border-slate-200 pb-1">
-                    <span>
-                      {isOverlayActive && stampData?.uin
-                        ? `Continuation Sheet to e-Stamp UIN: ${stampData.uin}`
-                        : `${order.formName} — Continuation Sheet`}
+              <div>
+                <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <span>{order.formName}</span>
+                  {stampData?.verified ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                      <CheckCircle className="w-3 h-3" /> e-Stamp Attached
                     </span>
-                    <span className="font-mono">Order: {order.id}</span>
-                  </div>
-                )}
-
-                {/* Agreement Content Layer (Positioned at exact blankStartPercent on e-Stamp Page 1, or top margin on plain A4) */}
-                <div
-                  className="absolute"
-                  style={{
-                    left: `${A4_SIDE_PADDING_PX}px`,
-                    right: `${A4_SIDE_PADDING_PX}px`,
-                    top: `${isOverlaidPage1 ? page1TopPx : 50}px`,
-                    bottom: `${isOverlaidPage1 ? Math.max(36, A4_HEIGHT_PX - page1BottomPx) : 44}px`,
-                    overflow: 'hidden'
-                  }}
-                >
-                  {blockIndices.map((idx) => (
-                    <React.Fragment key={blocks[idx].id}>{blocks[idx].node}</React.Fragment>
-                  ))}
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-semibold">
+                      e-Stamp Pending
+                    </span>
+                  )}
                 </div>
-
-                {/* Page Footer */}
-                <div className="absolute bottom-3 left-[52px] right-[52px] flex items-center justify-between text-[10px] font-sans text-slate-500 border-t border-slate-200/80 pt-1">
-                  <span className="flex items-center gap-1">
-                    <FileText className="w-3 h-3 text-slate-400" />
-                    <span>{order.formName} • Ref: {order.id}</span>
-                  </span>
-                  <span className="font-bold text-slate-700">
-                    Page {pageIdx + 1} of {pages.length}
-                  </span>
+                <div className="text-xs text-slate-500">
+                  Ref: <span className="font-mono">{order.id}</span> • Stamp Duty: ₹{order.stampDutyValue} • State: {legalData.state}
                 </div>
               </div>
             </div>
-          );
-        })}
+
+            <div className="flex items-center gap-2">
+              {!stampData && onUploadStampRequest && (
+                <button
+                  onClick={onUploadStampRequest}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 hover:bg-amber-600 text-white shadow-xs transition-colors cursor-pointer"
+                >
+                  Attach e-Stamp
+                </button>
+              )}
+
+              {onEditRequest && (
+                <button
+                  onClick={onEditRequest}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-gray-200 transition-colors cursor-pointer"
+                >
+                  Edit Fields
+                </button>
+              )}
+
+              <button
+                onClick={handleCopyText}
+                className="p-2 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-gray-200 transition-colors cursor-pointer"
+                title="Copy Raw Text"
+              >
+                <Download className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={handlePrint}
+                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-all active:scale-95 print-keep cursor-pointer"
+              >
+                <Printer className="w-4 h-4" />
+                Print A4 Document
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Multi-Page Summary Bar (No-Print) */}
+        <div className="no-print max-w-[794px] mx-auto bg-white rounded-xl border border-gray-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs shadow-2xs">
+          <div className="flex items-center gap-2 font-bold text-slate-800">
+            <Layers className="w-4 h-4 text-blue-600" />
+            <span>
+              Total A4 Pages: <strong className="text-blue-700">{safePages.length}</strong>{' '}
+              ({safePages.length === 1 ? '1 Sheet' : `${safePages.length} Sheets`})
+            </span>
+          </div>
+          {isOverlayActive ? (
+            <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded">
+              Page 1 Overlay Zone: {blankStartPercent}% – {blankEndPercent}% • Pages 2–{safePages.length}: Continuation A4
+            </span>
+          ) : (
+            <span className="text-[11px] font-semibold text-slate-500">
+              Standard A4 Multi-Page Format (210mm × 297mm)
+            </span>
+          )}
+        </div>
+
+        {/* Hidden Measurement Container (Exact A4 inner width) */}
+        <div
+          aria-hidden="true"
+          className="font-legal text-slate-900 leading-relaxed text-[13.5px]"
+          style={{
+            position: 'fixed',
+            left: '-99999px',
+            top: 0,
+            width: `${A4_CONTENT_WIDTH_PX}px`,
+            visibility: 'hidden',
+            pointerEvents: 'none'
+          }}
+        >
+          {blocks.map((block, idx) => (
+            <div
+              key={block.id}
+              ref={(el) => {
+                measureRefs.current[idx] = el;
+              }}
+            >
+              {block.node}
+            </div>
+          ))}
+        </div>
+
+        {/* Rendered Multi-Page A4 Sheets Container */}
+        <div ref={containerRef} id="printable-legal-document" className="print-only-container space-y-6">
+          {safePages.map((blockIndices, pageIdx) => {
+            const isFirstPage = pageIdx === 0;
+            const isOverlaidPage1 = isFirstPage && isOverlayActive;
+
+            return (
+              <div
+                key={pageIdx}
+                style={{
+                  width: `${Math.round(A4_WIDTH_PX * scale)}px`,
+                  height: `${Math.round(A4_HEIGHT_PX * scale)}px`
+                }}
+                className="mx-auto"
+              >
+                <div
+                  style={{
+                    width: `${A4_WIDTH_PX}px`,
+                    height: `${A4_HEIGHT_PX}px`,
+                    transform: scale < 1 ? `scale(${scale})` : undefined,
+                    transformOrigin: 'top left'
+                  }}
+                  className="a4-sheet-page relative bg-white border border-gray-300 shadow-lg overflow-hidden font-legal text-slate-900 leading-relaxed text-[13.5px]"
+                >
+                  {/* Page 1 e-Stamp Background Layer (when uploaded & overlay active) */}
+                  {isOverlaidPage1 && (
+                    <>
+                      {isStampPdf ? (
+                        <div className="absolute inset-0 bg-white">
+                          <object
+                            data={uploadedStampImage}
+                            type="application/pdf"
+                            aria-label="Uploaded e-Stamp PDF"
+                            className="w-full border-0 pointer-events-none"
+                            style={{ height: `${blankStartPercent}%` }}
+                          >
+                            <div
+                              className="w-full flex flex-col justify-between p-8 border-b-2 border-slate-300 bg-slate-50/80"
+                              style={{ height: `${page1TopPx - 8}px` }}
+                            >
+                              <div className="text-center border-b border-slate-300 pb-3">
+                                <div className="text-xs font-sans font-bold uppercase tracking-widest text-emerald-700">
+                                  Uploaded Official e-Stamp PDF Certificate
+                                </div>
+                                <div className="text-sm font-black text-slate-900 mt-1">
+                                  UIN: {stampData?.uin || 'ATTACHED'} • ₹{stampData?.stampDutyAmount || order.stampDutyValue}/- ({stampData?.state || legalData.state})
+                                </div>
+                              </div>
+                              <div className="text-center text-[11px] font-sans text-slate-500">
+                                Embedded PDF Certificate Header Zone (0% – {blankStartPercent}%)
+                              </div>
+                            </div>
+                          </object>
+                        </div>
+                      ) : (
+                        <img
+                          src={uploadedStampImage}
+                          alt="Uploaded Official e-Stamp Paper"
+                          className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
+                        />
+                      )}
+
+                      {/* Subtle Start & End divider guides (screen only, hidden in print) */}
+                      <div
+                        className="no-print absolute left-[52px] right-[52px] border-t border-dashed border-blue-500/60 flex justify-end pointer-events-none"
+                        style={{ top: `${page1TopPx - 6}px` }}
+                      >
+                        <span className="text-[9px] font-sans font-bold text-blue-600 bg-white/90 px-1.5 -mt-2.5 rounded">
+                          Top Start ({blankStartPercent}%)
+                        </span>
+                      </div>
+                      <div
+                        className="no-print absolute left-[52px] right-[52px] border-t border-dashed border-emerald-500/60 flex justify-end pointer-events-none"
+                        style={{ top: `${page1BottomPx}px` }}
+                      >
+                        <span className="text-[9px] font-sans font-bold text-emerald-700 bg-white/90 px-1.5 -mt-2.5 rounded">
+                          Bottom Limit ({blankEndPercent}%)
+                        </span>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Continuation Header on Page 2+ */}
+                  {!isFirstPage && (
+                    <div className="absolute top-4 left-[52px] right-[52px] flex items-center justify-between text-[10px] font-sans text-slate-400 border-b border-slate-200 pb-1">
+                      <span>
+                        {isOverlayActive && stampData?.uin
+                          ? `Continuation Sheet to e-Stamp UIN: ${stampData.uin}`
+                          : `${order.formName} — Continuation Sheet`}
+                      </span>
+                      <span className="font-mono">Order: {order.id}</span>
+                    </div>
+                  )}
+
+                  {/* Agreement Content Layer (Bounded between Top & Bottom Lines on Page 1, or top margin on plain A4) */}
+                  <div
+                    className="absolute"
+                    style={{
+                      left: `${A4_SIDE_PADDING_PX}px`,
+                      right: `${A4_SIDE_PADDING_PX}px`,
+                      top: `${isOverlaidPage1 ? page1TopPx : 50}px`,
+                      bottom: `${isOverlaidPage1 ? Math.max(32, A4_HEIGHT_PX - page1BottomPx) : 44}px`,
+                      overflow: 'hidden'
+                    }}
+                  >
+                    {blockIndices.map((idx) => {
+                      const block = blocks[idx];
+                      if (!block) return null;
+                      return <React.Fragment key={block.id}>{block.node}</React.Fragment>;
+                    })}
+                  </div>
+
+                  {/* Page Footer */}
+                  <div className="absolute bottom-3 left-[52px] right-[52px] flex items-center justify-between text-[10px] font-sans text-slate-500 border-t border-slate-200/80 pt-1">
+                    <span className="flex items-center gap-1">
+                      <FileText className="w-3 h-3 text-slate-400" />
+                      <span>{order.formName} • Ref: {order.id}</span>
+                    </span>
+                    <span className="font-bold text-slate-700">
+                      Page {pageIdx + 1} of {safePages.length}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
-    </div>
+    </DocumentErrorBoundary>
   );
 };

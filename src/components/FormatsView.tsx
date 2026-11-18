@@ -157,7 +157,7 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
           </div>
           <p className="text-xs text-slate-500 pt-2">
             {activeOverlay
-              ? `Page 1 shifts cleanly onto the uploaded e-Stamp paper's lower blank zone (starting at ${currentWatchingOrder.stampData?.blankStartPercent || 54}%), with remaining clauses flowing onto standard A4 continuation sheets.`
+              ? `Page 1 prints cleanly inside the uploaded e-Stamp zone (${currentWatchingOrder.stampData?.blankStartPercent || 54}% to ${currentWatchingOrder.stampData?.blankEndPercent || 94}%), with remaining clauses flowing onto standard A4 continuation sheets.`
               : 'Multi-page A4 legal format generated directly from submitted & edited order details. Any edits made in the Edit tab reflect immediately.'}
           </p>
         </div>
@@ -296,7 +296,9 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                           <span>
                             e-Stamp Attached
-                            {order.stampData?.blankStartPercent ? ` • Overlay ${order.stampData.blankStartPercent}%` : ''}
+                            {order.stampData?.blankStartPercent
+                              ? ` • Zone ${order.stampData.blankStartPercent}%–${order.stampData.blankEndPercent || 94}%`
+                              : ''}
                           </span>
                         </div>
                       ) : (
@@ -323,9 +325,11 @@ export const FormatsView: React.FC<FormatsViewProps> = ({
                     </div>
 
                     <button
+                      type="button"
                       onClick={() => {
                         setWatchingOrder(order);
                         setWatchingWithStampOverlay(formatMode === 'estamp');
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
                       }}
                       className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold text-white shadow-sm transition-all active:scale-95 cursor-pointer ${
                         formatMode === 'estamp'

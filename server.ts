@@ -451,17 +451,53 @@ app.get('/api/orders/stream', (req: Request, res: Response) => {
 app.get('/api/documents/render-pdf', async (req: Request, res: Response) => {
   const orderId = String(req.query.orderId || '');
   const overlay = req.query.overlay === 'true';
-  const order = activeOrdersStore.find((o) => o.id === orderId);
+  let order = activeOrdersStore.find((o) => o.id === orderId);
+  if (!order && orderId) {
+    try {
+      const supaUrl = resolveSupabaseUrl();
+      const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+      if (supaUrl && supaKey) {
+        const resp = await fetch(`${supaUrl}/rest/v1/orders?id=eq.${encodeURIComponent(orderId)}&select=*`, {
+          headers: { apikey: supaKey, Authorization: `Bearer ${supaKey}` }
+        });
+        if (resp.ok) {
+          const rows = await resp.json();
+          if (Array.isArray(rows) && rows[0]) {
+            const r = rows[0];
+            const p = r.payload || r.order_data || r.raw_payload || r.data || {};
+            order = {
+              id: String(r.docket_id || p.id || r.id),
+              formName: r.form_name || p.formName || 'Legal Document',
+              clientName: r.client_name || p.clientName || 'Client',
+              clientPhone: r.client_phone || p.clientPhone || '',
+              clientEmail: r.client_email || p.clientEmail || '',
+              state: r.state || p.state || 'Delhi',
+              stampDutyValue: Number(r.stamp_duty_value ?? p.stampDutyValue ?? 500),
+              legalData: r.legal_data || p.legalData,
+              registrationData: r.registration_data || p.registrationData,
+              stampData: r.stamp_data || p.stampData,
+              rawPayload: p
+            };
+          }
+        }
+      }
+    } catch {}
+  }
   if (!order) {
     return res.status(404).json({ success: false, error: `Order ${orderId} not found for PDF rendering` });
   }
   try {
     const useOverlay = overlay || Boolean(order.stampData?.verified && (order.stampData?.scanUrl || order.stampData?.eStampPaperUrl));
+    const startPct = Number(order.stampData?.blankStartPercent) || 54;
+    const endPct = Number(order.stampData?.blankEndPercent) || 94;
+    const topBlank = Number(order.stampData?.topOffsetPt) || Math.round((startPct / 100) * 841.89);
+    const bottomBlank = Math.round((endPct / 100) * 841.89);
     const pdfBuffer = await generateLegalAgreementPdf(
       { ...order, overlayProvision: useOverlay },
       {
         overlayProvision: useOverlay,
-        topBlankSpace: order.stampData?.topOffsetPt || 440,
+        topBlankSpace: topBlank,
+        bottomBlankSpace: bottomBlank,
         stampImageBase64: useOverlay ? (order.stampData?.scanUrl || order.stampData?.eStampPaperUrl) : undefined
       }
     );
@@ -1434,11 +1470,12 @@ app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => 
       stampUrl = uploadRes.url;
     }
 
-    const startPct = Number(blankStartPercent) || 54;
-    const endPct = Number(blankEndPercent) || 94;
+    const startPct = Math.max(15, Math.min(88, Number(blankStartPercent) || 54));
+    const endPct = Math.max(startPct + 8, Math.min(98, Number(blankEndPercent) || 94));
     const computedTopPt = Number(topOffset) || Math.round((startPct / 100) * 841.89);
+    const computedBottomPt = Number(req.body?.bottomOffset) || Math.round((endPct / 100) * 841.89);
 
-    // Generate PDF with exact detected topBlankSpace and embedded e-Stamp scan on Page 1
+    // Generate PDF with exact Top/Bottom boundary zone and embedded e-Stamp scan on Page 1
     const pdfBuffer = await generateLegalAgreementPdf(
       {
         ...order,
@@ -1447,7 +1484,8 @@ app.post('/api/documents/overlay-stamp', async (req: Request, res: Response) => 
       {
         overlayProvision: true,
         topBlankSpace: computedTopPt,
-        stampImageBase64: stampPaperImageBase64
+        bottomBlankSpace: computedBottomPt,
+        stampImageBase64: stampUrl || stampPaperImageBase64
       }
     );
 

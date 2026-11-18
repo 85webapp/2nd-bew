@@ -351,6 +351,16 @@ function extractAllCheckboxes(order: Order, scopes: Record<string, any>[]): Extr
 /**
  * Collects any remaining non-checkbox fields in an object that were NOT explicitly consumed by structured sections.
  */
+function isRawBase64Blob(val: any): boolean {
+  if (typeof val !== 'string') return false;
+  const s = val.trim();
+  if (s.startsWith('data:') && s.includes(';base64,')) return true;
+  if (s.length > 240 && /^[A-Za-z0-9+/=_\s]+$/.test(s.slice(0, 120)) && /^(JVBERi0|\/9j\/|iVBORw0KGgo|UklGR|R0lGOD)/.test(s)) {
+    return true;
+  }
+  return false;
+}
+
 function collectRemainingFields(
   sourceObj: any,
   consumed: Set<string>,
@@ -368,6 +378,7 @@ function collectRemainingFields(
     // Booleans are already shown in the dedicated Checkboxes section (unless wrapped in descriptor)
     if (typeof v === 'boolean') continue;
     if (v && typeof v === 'object' && !Array.isArray(v) && ('checked' in v || 'isChecked' in v || 'ticked' in v)) continue;
+    if (isRawBase64Blob(v)) continue;
 
     consumed.add(fullNk);
     consumed.add(nk);
@@ -379,6 +390,8 @@ function collectRemainingFields(
       if ((v as any).optional === true || (v as any).required === false) isOpt = true;
       if ((v as any).required === true || (v as any).optional === false) isOpt = false;
     }
+
+    if (isRawBase64Blob(actualVal)) continue;
 
     const empty = isValueEmpty(actualVal);
     if (empty && !hints.requiredKeys.has(nk)) {
